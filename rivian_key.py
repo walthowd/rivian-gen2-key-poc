@@ -152,9 +152,18 @@ def next_step(name, shown_as):
 
 
 # ── commands ─────────────────────────────────────────────────────────
+def after_login():
+    names = key_names()
+    if names:
+        log(f"next: python rivian_key.py status   (your keys: {', '.join(names)})")
+    else:
+        log('next: python rivian_key.py enroll "MacBook"   (any name you like; the vehicle shows it)')
+
+
 async def cmd_login(args):
     if args.token:
-        return save_session(getpass.getpass("Session token (input hidden): ").strip())
+        save_session(getpass.getpass("Session token (input hidden): ").strip())
+        return after_login()
     email = input("Rivian email: ").strip()
     password = getpass.getpass("Rivian password: ")
     api = Rivian()
@@ -171,6 +180,7 @@ async def cmd_login(args):
         if not token:
             die("sign-in did not return a session")
         save_session(token)
+        after_login()
     finally:
         await api.close()
 
