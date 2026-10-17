@@ -148,7 +148,9 @@ def save_session(token):
 
 def next_step(name, shown_as):
     key_arg = f' --key "{name}"' if len(key_names()) > 1 else ""
-    log(f"next: python pair.py{key_arg}   (it tells you when to open Set Up for '{shown_as}' on the vehicle)")
+    log("next: take this computer to the vehicle (sit inside, or right next to it), then run:")
+    log(f"      python pair.py{key_arg}")
+    log(f"      it tells you when to open Set up for '{shown_as}' on the vehicle's screen")
 
 
 # ── commands ─────────────────────────────────────────────────────────
