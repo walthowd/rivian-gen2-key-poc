@@ -44,27 +44,42 @@ pip install -r requirements.txt
 
 Opening a new terminal later? Run `source .venv/bin/activate` in the folder again first.
 
-**3. Sign in and create a key.** The name you pick is what the vehicle will show:
+**3. Run guided setup:**
 
 ```bash
-python rivian_key.py login             # Rivian email, password, verification code
-python rivian_key.py enroll "MacBook"  # registers a new phone key called "MacBook"
+python rivian_key.py
 ```
 
-**4. Sit in the vehicle with your Mac and run:**
+Setup signs in if there is no saved session, asks for a key name if you have no local key
+(or yours was removed from the vehicle),
+and checks the existing key's status. With several local keys, it asks which to use.
+It offers to pair when needed: **sit inside the vehicle with your Mac** before accepting.
+You can decline and run the same command later to resume.
 
-```bash
-python pair.py
-```
+After pairing, setup checks status for up to a minute and reports success only when the key
+is both paired and enabled. It then offers an optional menu of test commands (wake, lock,
+unlock, windows open/close, honk); nothing is sent until you select it. If setup fails, it
+points to redacted debug logs and the repository's issue page. A saved session that has
+expired can be replaced with `python rivian_key.py login` before rerunning setup.
 
-It tells you what to do on the vehicle's screen:
+For multiple vehicles, use `python rivian_key.py setup --vehicle NAME` when enrolling.
+You can also use `setup --key NAME` or `setup --token` (paste a session token when sign-in
+is needed). The individual `login`, `enroll`, `pair.py`, `status`, and `command` commands
+remain available.
 
-- Tap **Settings** (the gear icon)
+**4. Follow the pairing prompts.**
+
+It tells you what to do on the vehicle's screen (the vehicle must be awake):
+
+- Right after setup creates the key, the vehicle pops up **Set up your phone key** with its name.
+  Tap **See Devices**, pick your driver, then find the key (next step).
+
+  <img src="docs/step0-popup.jpg" width="360" alt="Set up your phone key pop-up">
+
+  No pop-up (e.g. you dismissed it, or the key was created earlier)? Tap **Settings** (the gear
+  icon), then **Drivers and keys**:
 
   <img src="docs/step1-settings.jpg" width="360" alt="Settings gear icon">
-
-- Tap **Drivers and keys**
-
   <img src="docs/step2-drivers-and-keys.jpg" width="360" alt="Drivers and keys">
 
 - Find the phone key with your name (here "POC Mac") and tap **Set up**. Then press Enter on the Mac.
@@ -79,7 +94,8 @@ It tells you what to do on the vehicle's screen:
 
   <img src="docs/step5-ready.jpg" width="480" alt="Your phone key is ready">
 
-If Set up times out (about a minute), tap **Try again** and run `python pair.py` again.
+If Set up times out (about a minute), tap **Try again** and accept setup's retry prompt
+(or run `python pair.py` again).
 Pairing this Mac again (e.g. after `remove`)? First forget "Rivian Key …" in System Settings → Bluetooth; `pair.py` warns you if you forgot.
 If macOS asks whether your terminal may use Bluetooth, allow it.
 
@@ -146,7 +162,8 @@ for this. It is the first known obstacle to pairing straight from Home Assistant
 
 ## Report your results
 
-Open an issue with your vehicle (model, year, software version), macOS version, and the log
+Open an [issue](https://github.com/walthowd/rivian-gen2-key-poc/issues/new) with your vehicle
+(model, year, software version), macOS version, and the setup log plus the log
 file from `logs/` that `pair.py` mentions. Logs are detailed but have tokens, keys, IDs, VINs,
 names and addresses removed, so they're safe to attach.
 
