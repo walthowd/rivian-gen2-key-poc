@@ -54,10 +54,10 @@ def main(argv=None):
     key = load_key(cli.key)
     if sys.stdin.isatty():
         shown_as = key.get("device_name") or key["name"]
-        print(f"\nOn the vehicle's center screen:\n"
-              "  1. tap Settings (the gear icon)\n"
-              "  2. tap Drivers and keys\n"
-              f"  3. find the phone key named \"{shown_as}\" and tap Set up\n"
+        print(f"\nOn the vehicle's center screen (the vehicle must be awake):\n"
+              f"  1. on the \"Set up your phone key\" pop-up for \"{shown_as}\", tap See Devices\n"
+              "     (no pop-up? tap Settings (the gear icon), then Drivers and keys)\n"
+              f"  2. pick your driver, find the phone key named \"{shown_as}\" and tap Set up\n"
               "Set up times out after about a minute; if it does, tap Try again and re-run this.\n")
         input("Press Enter as soon as the Set up screen is showing... ")
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Rivian account side of the Gen 2 phone-key POC (via rivian-python-client).
 
+  setup                 guided login, enrollment, pairing and command tests (default)
   login                 sign in (email, password, verification code)
   login --token         or paste an existing session token (e.g. from Home Assistant)
   enroll NAME           register a new phone key named NAME for your vehicle
@@ -21,8 +22,13 @@ if sys.version_info < (3, 11):  # before anything else: dependencies need 3.11+
 import argparse
 import asyncio
 import getpass
+import os
+import platform
 import re
+import subprocess
 import time
+from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 from rivian import Rivian
@@ -165,7 +171,9 @@ def after_login():
 async def cmd_login(args):
     if args.token:
         save_session(getpass.getpass("Session token (input hidden): ").strip())
-        return after_login()
+        if not getattr(args, "guided", False):
+            after_login()
+        return
     email = input("Rivian email: ").strip()
     password = getpass.getpass("Rivian password: ")
     api = Rivian()
@@ -182,7 +190,8 @@ async def cmd_login(args):
         if not token:
             die("sign-in did not return a session")
         save_session(token)
-        after_login()
+        if not getattr(args, "guided", False):
+            after_login()
     finally:
         await api.close()
 
@@ -236,10 +245,16 @@ async def cmd_enroll(args):
         if not enrolled_ok:
             die("Rivian refused the enrollment")
         phone_id, enrolled = find_phone(await current_user(api), public_key, vehicle["id"])
+        for _ in range(12):  # Rivian can take a little while to list a new key
+            if phone_id:
+                break
+            await asyncio.sleep(5)
+            phone_id, enrolled = find_phone(await current_user(api), public_key, vehicle["id"])
         if not phone_id:
             die("registered, but the key isn't visible yet — try `status` in a minute")
         save_key(args.name, "enroll", user, vehicle, public_key, private_key, phone_id, enrolled)
-        next_step(args.name, args.name)
+        if not getattr(args, "guided", False):
+            next_step(args.name, args.name)
     finally:
         await api.close()
 
@@ -298,13 +313,16 @@ async def cmd_status(args):
                 if device.get("id") == key["phone_id"]:
                     log.debug(f"device: type={device.get('type')} paired={device.get('isPaired')} "
                               f"enabled={device.get('isEnabled')}")
+                    if getattr(args, "guided", False):  # setup reports progress itself
+                        return device
                     paired = device.get("isPaired")
                     log(f"{key['name']}: {'PAIRED' if paired else 'not paired yet'} "
                         f"(isPaired={paired}, isEnabled={device.get('isEnabled')})")
                     if not paired:
                         log("just ran pair.py? the vehicle reports pairing to Rivian within a minute or so — check again")
-                    return
-        log(f"{key['name']}: not registered on the vehicle any more")
+                    return device
+        if not getattr(args, "guided", False):
+            log(f"{key['name']}: not registered on the vehicle any more")
     finally:
         await api.close()
 
@@ -337,6 +355,7 @@ async def cmd_command(args):
         log.secret(command_id, "command_id")
         log.debug(f"command {command} params={params}: id={command_id}")
         log(f"{command}: {'accepted' if command_id else 'rejected (is the key paired?)'}")
+        return bool(command_id)
     finally:
         await api.close()
 
@@ -375,9 +394,163 @@ async def cmd_remove(args):
         await api.close()
 
 
+def error_text(error):
+    """One safe line about an exception: plain text/number arguments plus any GraphQL error
+    codes. Never the exception itself — Rivian API errors carry the whole response (other
+    drivers' names, IDs)."""
+    parts = [str(a) for a in error.args if isinstance(a, (str, int))]
+    for arg in error.args:
+        for item in (arg.get("errors") or []) if isinstance(arg, dict) else []:
+            extensions = item.get("extensions") or {}
+            parts.append("/".join(str(v) for v in (extensions.get("code"), extensions.get("reason")) if v)
+                         or "no error code")
+            log.debug(f"graphql error message: {item.get('message')}")
+    return f"{type(error).__name__}: {' '.join(parts)}"[:300]
+
+
+ISSUES_URL = "https://github.com/walthowd/rivian-gen2-key-poc/issues/new"
+
+
+def setup_help():
+    if log.file:
+        log(f"Setup debug log: {Path(log.file.name).relative_to(ROOT)} (redacted)")
+    log("Also attach the logs/pair-*.log file printed by pairing, if attempted. Keep keys/ private.")
+    log(f"Report an issue with those logs and your vehicle/OS versions: {ISSUES_URL}")
+
+
+def choose_key(names):
+    if len(names) == 1:
+        return names[0]
+    print("Choose an existing key:")
+    for index, name in enumerate(names, 1):
+        print(f"  {index}. {name}")
+    while True:
+        choice = input("Key number: ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(names):
+            return names[int(choice) - 1]
+        print("Enter one of the key numbers above.")
+
+
+def key_ready(device):
+    return bool(device and device.get("isPaired") and device.get("isEnabled"))
+
+
+async def wait_for_status(args, done, message, attempts=6):
+    """Re-check status every 10s until done(device), saying `message` once while waiting."""
+    device = await cmd_status(args)
+    for attempt in range(attempts):
+        if done(device):
+            break
+        if attempt == 0:
+            log(message)
+        await asyncio.sleep(10)
+        device = await cmd_status(args)
+    return device
+
+
+async def test_commands(key_name):
+    commands = ("wake", "lock", "unlock", "windows_open", "windows_close", "honk")
+    print("\nOptional vehicle tests: selecting a command sends it to the vehicle.")
+    while True:
+        for index, command in enumerate(commands, 1):
+            print(f"  {index}. {command}")
+        print("  0. Finish")
+        choice = input("Test command [0]: ").strip() or "0"
+        if choice == "0":
+            return
+        if not choice.isdigit() or not 1 <= int(choice) <= len(commands):
+            print("Enter a command number, or 0 to finish.")
+            continue
+        try:
+            accepted = await cmd_command(SimpleNamespace(
+                key=key_name, command=commands[int(choice) - 1], value=None, list=False))
+        except Exception as error:  # noqa: BLE001 — one failed test shouldn't end setup
+            log.exception(f"{commands[int(choice) - 1]}: error: {error_text(error)}")
+            accepted = False
+        if not accepted:
+            setup_help()
+
+
+async def cmd_setup(args):
+    if not sys.stdin.isatty():
+        die("guided setup needs an interactive terminal; use login, enroll, status or command individually")
+    if not SESSION_FILE.exists() or not load_session().get("user_session_token"):
+        await cmd_login(SimpleNamespace(token=args.token, guided=True))
+    else:
+        log("using saved sign-in")
+
+    args.guided = True
+    names = key_names()
+    if args.key:
+        args.key = load_key(args.key)["name"]
+    elif names:
+        args.key = choose_key(names)
+    if args.key:
+        device = await cmd_status(args)
+        if device is None:
+            # Removed on the vehicle or in the app: its local file is useless now. Keep it aside
+            # (not deleted) and set up a fresh key in its place.
+            stale = key_path(args.key)
+            stale.rename(stale.with_name(stale.name + ".unregistered"))
+            log(f"{args.key}: no longer registered with the vehicle — setting up a new key "
+                f"(old file kept as keys/{stale.name}.unregistered)")
+    if not args.key or device is None:
+        default = args.key or "MacBook"
+        name = input(f"Name for the new phone key [{default}]: ").strip() or default
+        await cmd_enroll(SimpleNamespace(name=name, vehicle=args.vehicle, guided=True))
+        args.key = name
+        device = await wait_for_status(args, lambda d: d is not None,
+                                       "waiting for the vehicle to list the new key…")
+    if device is None:
+        log("Setup cannot continue: the new key isn't listed on the vehicle yet. "
+            "Wait a minute and run setup again.")
+        setup_help()
+        return 1
+    log(f"{args.key}: {'paired' if device.get('isPaired') else 'registered, not paired yet'}"
+        f"{'' if device.get('isEnabled') else ' (disabled)'}")
+    if not device.get("isPaired"):
+        print("\nPairing requires you to be inside the vehicle with this computer. "
+              "You will also need to use the vehicle's center screen.")
+        if input("Start Bluetooth pairing now? [y/N] ").strip().lower() not in ("y", "yes"):
+            log("Setup saved. Run python rivian_key.py again when you are in the vehicle.")
+            return 0
+        pair_cmd = [sys.executable, str(ROOT / "pair.py"), "--key", args.key]
+        if platform.system() == "Linux" and os.geteuid() != 0:
+            pair_cmd.insert(0, "sudo")  # raw Bluetooth sockets; see LINUX.md
+        while True:
+            result = subprocess.run(pair_cmd, check=False)
+            log.debug(f"pair.py exited with status {result.returncode}")
+            if result.returncode == 0:
+                device = await wait_for_status(args, lambda d: key_ready(d) or d is None,
+                                               "waiting for the vehicle to confirm pairing to Rivian…")
+            else:
+                device = await cmd_status(args)
+            if key_ready(device):
+                break
+            setup_help()
+            if result.returncode == 0 or input(
+                    "After following the pairing advice, try pairing again? [y/N] "
+                    ).strip().lower() not in ("y", "yes"):
+                break
+
+    if not key_ready(device):
+        log("Setup not confirmed: the key must be both paired and enabled. "
+            "If pairing just succeeded, wait a minute and run setup again; "
+            "if disabled, check Drivers and keys on the vehicle.")
+        setup_help()
+        return 1
+    log("SUCCESS — your key is paired and enabled.")
+    await test_commands(args.key)
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = p.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
+    sub = p.add_subparsers(dest="cmd", metavar="COMMAND")
+    s = sub.add_parser("setup", help="guided setup (also runs when no command is given)")
+    s.add_argument("--key", help="existing key to use")
+    s.add_argument("--vehicle", help="vehicle name (only if you have several)")
+    s.add_argument("--token", action="store_true", help="use a session token when signing in")
     sub.add_parser("login", help="sign in").add_argument(
         "--token", action="store_true", help="paste an existing session token instead (prompted, not echoed)")
     s = sub.add_parser("enroll", help="register a new phone key")
@@ -399,23 +572,33 @@ def main(argv=None):
     s.add_argument("--motion", action="store_true", help="show: play on motion instead of now")
     s.add_argument("--key", help="key name (only if you have several)")
     args = p.parse_args(argv)
+    if args.cmd is None:
+        args = p.parse_args(["setup"])
 
     KEYS_DIR.mkdir(mode=0o700, exist_ok=True)
     log_path = log.open(f"rivian_key-{args.cmd}")
-    handler = {"login": cmd_login, "enroll": cmd_enroll, "import-ha": cmd_import_ha,
+    handler = {"setup": cmd_setup, "login": cmd_login, "enroll": cmd_enroll, "import-ha": cmd_import_ha,
                "status": cmd_status, "command": cmd_command, "halloween": cmd_halloween,
                "remove": cmd_remove}[args.cmd]
     try:
-        asyncio.run(handler(args))
+        result = asyncio.run(handler(args))
+    except (KeyboardInterrupt, EOFError):
+        log("Stopped. Your saved sign-in and keys are kept; run setup again to continue.")
+        return 130
+    except SystemExit as error:
+        if args.cmd != "setup":
+            raise
+        setup_help()
+        return error.code or 0
     except KeyError as error:
         log.exception(f"unexpected reply from Rivian (missing {error}) — session expired? run `login` again")
     except Exception as error:  # noqa: BLE001 — rivian-python-client raises many types
-        # Never print the exception itself: Rivian API errors carry the whole response (other
-        # drivers' names, IDs). Keep only plain text/number arguments.
-        detail = " ".join(str(a) for a in error.args if isinstance(a, (str, int)))
-        log.exception(f"error: {type(error).__name__}: {detail}"[:300])
+        log.exception(f"error: {error_text(error)}")
     else:
-        return 0
+        return result if args.cmd == "setup" else 0
+    if args.cmd == "setup":
+        setup_help()  # already names the debug log
+        return 1
     print(f"details in {log_path.relative_to(ROOT)} (redacted; attach it when reporting)", file=sys.stderr)
     return 1
 
