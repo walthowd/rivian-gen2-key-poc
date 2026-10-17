@@ -1,0 +1,13 @@
+# Secrets: session token, private keys, per-key IDs
+keys/
+# Run logs (redacted by default, but still personal)
+logs/
+*.log
+*.pcap
+*.pcapng
+*.snoop
+
+.venv/
+__pycache__/
+*.pyc
+.DS_Store

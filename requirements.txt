@@ -1,0 +1,3 @@
+rivian-python-client>=2.1,<3
+bleak>=3,<4
+cryptography>=41
