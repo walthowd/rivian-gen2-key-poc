@@ -1,12 +1,23 @@
 # rivian-gen2-key-poc
 
-Make your **Mac a phone key for a Gen 2 Rivian** (R1S / R1T), so you can send signed commands
-(lock, unlock, windows, precondition, …) to it from your own code.
+This is a proof of concept that allows a **Mac (or [Linux computer](#linux)) to link to a
+Gen 2 Rivian** (R1S / R1T) so you can send it remote commands.
 
-Gen 2 vehicles use a new Bluetooth pairing handshake that existing tools (like the Home
-Assistant Rivian integration's **Pair** button) can't do yet
-([#181](https://github.com/bretterer/home-assistant-rivian/issues/181)). This proof of concept does it.
-How it works is documented in [PROTOCOL.md](PROTOCOL.md).
+Remote commands (lock/unlock, windows, precondition, etc.) are sent over the Rivian GraphQL
+API, but need to be signed with your generated key. The signature is an **HMAC-SHA256** of
+the command name and timestamp, using a shared secret derived from your private key and
+the vehicle's public key through ECDH and HKDF-SHA256.
+
+Once you have linked your generated key to the Rivian **one time over Bluetooth**, you can
+send signed API requests **over the internet — no Bluetooth required anymore** for those
+remote commands. This uses the older, pre-CCC **Phone key** system, rather than a CCC
+Digital Key such as an iPhone or Apple Watch wallet key.
+
+This project uses [rivian-python-client](https://github.com/bretterer/rivian-python-client)
+and grew out of work on Gen 2 pairing for the
+[Home Assistant Rivian integration](https://github.com/bretterer/home-assistant-rivian)
+([pairing discussion](https://github.com/bretterer/home-assistant-rivian/issues/181)).
+The Bluetooth pairing handshake is documented in [PROTOCOL.md](PROTOCOL.md).
 
 > **Proof of concept.** Tested on one 2026 R1S. Please [report your results](#report-your-results), good or bad.
 > Unofficial; not affiliated with Rivian. Use at your own risk.
