@@ -1,0 +1,194 @@
+"""Offline tests of the navigation messages; no account or vehicle access."""
+import asyncio
+import base64
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import AsyncMock, Mock, patch
+from urllib.parse import parse_qs, urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import rivian_key
+import trip
+from protocol import parse_fields
+
+USER = "02-00000000-0000-0000-0000-000000000000-00000000"
+STOPS = [{"name": "Golf", "place_id": "ChIJgolf", "latitude": 40.5, "longitude": -91.5},
+         {"name": "Stadium", "latitude": 39.0, "longitude": -94.5}]
+PLAN = {
+    "planIdentifierMetadata": {"abrpRouteId": "route-1", "legs": [
+        {"abrpLegId": "leg:0:", "routeRequest": "v1:{a}"},
+        {"abrpLegId": "leg:1:", "routeRequest": "v1:{b}"},
+        {"abrpLegId": "leg:2:", "routeRequest": "v1:{c}"}]},
+    "summary": {"totalDriveDistanceMeters": 300000, "totalTripDurationSeconds": 14400,
+                "totalChargeDurationSeconds": 1800, "arrivalSOCPercent": 25, "destinationReachable": True},
+    "waypoints": [
+        {"latitude": 40.0, "longitude": -92.0, "isSystemAdded": False, "arrivalSOCPercent": 90},
+        {"latitude": 40.5, "longitude": -91.5, "isSystemAdded": False, "arrivalSOCPercent": 70},
+        {"latitude": 40.9, "longitude": -91.9, "isSystemAdded": True, "arrivalSOCPercent": 20,
+         "charger": {"name": "Charger", "entityId": "charger-1", "chargeDurationSeconds": 1800}},
+        {"latitude": 39.0, "longitude": -94.5, "isSystemAdded": False, "arrivalSOCPercent": 25}],
+}
+
+
+class TripMessages(unittest.TestCase):
+    def test_trip_message_layout(self):
+        fields = parse_fields(trip.trip_message(PLAN, STOPS, USER, 20))
+        route = parse_fields(fields[1][0])
+        self.assertEqual(route[1], [b"route-1"])
+        legs = [parse_fields(leg) for leg in route[2]]
+        self.assertEqual([leg[2][0] for leg in legs], [b"v1:{a}", b"v1:{b}", b"v1:{c}"])
+        golf, charger, stadium = (parse_fields(leg[3][0]) for leg in legs)
+        self.assertEqual((golf[1], golf[3], golf.get(4)), ([b"Golf"], [b"ChIJgolf"], None))
+        self.assertEqual((charger[1], charger[3], charger[4], charger[5]), ([b"Charger"], [b"charger-1"], [1], [1]))
+        self.assertEqual((stadium[1], stadium.get(3)), ([b"Stadium"], None))
+        self.assertEqual(parse_fields(fields[3][0])[1], [USER.encode()])
+
+    def test_coordinates_are_doubles(self):
+        message = trip._destination(PLAN["waypoints"][1], STOPS[0])
+        self.assertIn(trip.f_double(1, 40.5) + trip.f_double(2, -91.5), message)
+
+    def test_stop_count_mismatch_is_refused(self):
+        with self.assertRaises(ValueError):
+            trip.trip_message(PLAN, STOPS + [STOPS[0]], USER, 20)
+
+    def test_end_trip_and_unsigned_envelope(self):
+        end = parse_fields(trip.end_trip_message(USER))
+        self.assertTrue(parse_fields(end[1][0])[1][0].startswith(b"end_trip_"))
+        self.assertEqual(end[2], [b""])
+        outer = parse_fields(base64.b64decode(trip.payload(b"x")))
+        self.assertEqual(parse_fields(outer[10][0])[2], [b"x"])
+        self.assertEqual(len(outer[16][0]), 16)
+        self.assertNotIn(17, outer)  # no signature: trips aren't signed with the key
+
+    def test_trip_waypoints_like_the_app(self):
+        waypoints = trip.trip_waypoints({"latitude": 1.0, "longitude": 2.0}, STOPS, 20)
+        self.assertEqual(waypoints[0], {"address": {"address": "", "addressSourceId": "", "latitude": 1.0,
+                                                    "longitude": 2.0, "name": "Vehicle location"}})
+        self.assertEqual(waypoints[1]["address"]["addressSourceId"], "ChIJgolf")
+        self.assertEqual(waypoints[1]["address"]["addressSourceType"], "google")
+        self.assertNotIn("addressSourceType", waypoints[2]["address"])
+        self.assertNotIn("minArrivalSoC", waypoints[1])
+        self.assertEqual(waypoints[2]["minArrivalSoC"], 20)
+
+    def test_share_url(self):
+        query = parse_qs(urlparse(trip.share_url(STOPS[0])).query)
+        self.assertEqual(query["geo_coordinates"], ["40.5,-91.5"])
+        self.assertEqual((query["name"], query["entity_id"], query["source_type"]), (["Golf"], ["ChIJgolf"], ["telenav"]))
+        self.assertEqual(trip.share_url(STOPS[1]),  # no place id: Rivian refuses telenav links without one
+                         "https://www.google.com/maps/search/?api=1&query=39.0%2C-94.5")
+        self.assertEqual(trip.share_url({"url": "geo:1,2"}), "geo:1,2")
+
+
+class ActiveStops(unittest.TestCase):
+    @staticmethod
+    def leg(name=None, place_id=None, lat=1.0, lng=2.0):
+        from protocol import f_len, f_var
+        destination = f_len(1, trip.f_double(1, lat) + trip.f_double(2, lng)) + f_var(3, 2)
+        destination += (f_len(4, name.encode()) if name else b"") + (f_len(5, place_id.encode()) if place_id else b"")
+        return f_len(3, f_len(1, b"\0" * 8) + f_len(3, f_len(1, destination)) + f_len(4, b"steps"))
+
+    def test_named_destinations_in_order(self):
+        from protocol import f_len
+        route = (f_len(1, b"-123") + self.leg("Golf", "ChIJgolf", 40.5, -91.5) + self.leg() +
+                 self.leg("Stadium", None, 39.0, -94.5) + f_len(4, b"settings"))
+        self.assertEqual(trip.active_stops(route), [
+            {"name": "Golf", "place_id": "ChIJgolf", "latitude": 40.5, "longitude": -91.5},
+            {"name": "Stadium", "place_id": None, "latitude": 39.0, "longitude": -94.5}])
+
+    def test_chargers_the_vehicle_planned(self):
+        from protocol import f_len
+        charger = f_len(1, b"id-1") + f_len(2, b"Town [Tesla]") + f_len(3, b"") + trip.f_double(4, 2520.0)
+        route = f_len(3, f_len(3, f_len(1, b"x")) + f_len(3, f_len(2, charger)))
+        self.assertEqual(trip.active_chargers(route), [("Town [Tesla]", 42)])
+        self.assertEqual(trip.active_chargers(b""), [])
+
+    def test_not_navigating(self):
+        self.assertEqual(trip.active_stops(b""), [])
+        self.assertEqual(trip.active_stops(None), [])
+
+
+class Watcher(unittest.IsolatedAsyncioTestCase):
+    async def test_waits_for_the_vehicles_route(self):
+        api = Mock()
+        callbacks = []
+
+        async def subscribe(vehicle_id, callback, rvms):
+            callbacks.append(callback)
+            callback(message(b""))  # the current route arrives first: not navigating
+            return AsyncMock()
+        api.subscribe_for_parallax_messages = subscribe
+
+        def message(route, rvm=trip.TRIP_INFO):
+            return {"payload": {"data": {"parallaxMessages": {"rvm": rvm,
+                                                              "payload": base64.b64encode(route).decode()}}}}
+        async with trip.TripWatcher(api, "v") as watch:
+            self.assertEqual(watch.route, b"")
+            asyncio.get_running_loop().call_later(0.01, callbacks[0], message(b"other", rvm="x.y"))
+            asyncio.get_running_loop().call_later(0.02, callbacks[0], message(b"Golf route"))
+            self.assertTrue(await watch.wait(lambda route: b"Golf" in route, 1))
+            self.assertFalse(await watch.wait(lambda route: route == b"", 0.05))
+
+
+class Summary(unittest.TestCase):
+    def test_missing_numbers_and_extra_stops_dont_crash(self):
+        plan = {"summary": {"totalDriveDistanceMeters": None, "destinationReachable": False},
+                "waypoints": [{}, {"arrivalSOCPercent": None}, {"isSystemAdded": True, "charger": {"name": "C"}},
+                              {"arrivalSOCPercent": 5}]}
+        with patch("builtins.print") as printed:
+            rivian_key.trip_summary(plan, [STOPS[0]])
+        lines = [c.args[0] for c in printed.call_args_list]
+        self.assertIn("? mi", lines[0])
+        self.assertIn("NOT REACHABLE", lines[0])
+        self.assertEqual(lines[-1], "  stop:   ? (arrive 5%)")
+
+
+class InsertPosition(unittest.TestCase):
+    def test_positions(self):
+        self.assertEqual([rivian_key.insert_position(at, 2) for at in ("next", "end", "1", "2", "3")], [0, 2, 0, 1, 2])
+        for bad in ("0", "4", "last"):
+            with patch.object(rivian_key, "die", side_effect=SystemExit), self.assertRaises(SystemExit):
+                rivian_key.insert_position(bad, 2)
+
+
+class Places(unittest.TestCase):
+    SAVED = [{"name": "123 Main St", "userGivenName": "Home", "address": "123 Main St",
+              "coordinate": {"latitude": 1.5, "longitude": 2.5}}]
+
+    def test_home_by_location_type(self):
+        saved = [{"name": "9 Elm St", "userGivenName": None, "locationType": "RECENT",
+                  "coordinate": {"latitude": 3.0, "longitude": 4.0}},
+                 {"name": "1 Oak St", "userGivenName": None, "locationType": "FAVORITE_HOME",
+                  "coordinate": {"latitude": 1.0, "longitude": 2.0}}]
+        place = rivian_key.resolve_place("Home", saved)
+        self.assertEqual((place["name"], place["latitude"]), ("Home", 1.0))
+        self.assertIsNone(place["place_id"])
+        self.assertEqual(rivian_key.resolve_place("9 elm st", saved)["name"], "9 Elm St")
+
+    def test_coordinates_with_and_without_name(self):
+        self.assertEqual(rivian_key.resolve_place("40.5, -91.5=Golf course", []),
+                         {"name": "Golf course", "latitude": 40.5, "longitude": -91.5})
+        self.assertEqual(rivian_key.resolve_place("40,-91", [])["name"], "40,-91")
+
+    def test_saved_location_by_name(self):
+        place = rivian_key.resolve_place("home", self.SAVED)
+        self.assertEqual((place["name"], place["latitude"]), ("Home", 1.5))
+
+    def test_saved_location_without_coordinates(self):
+        with patch.object(rivian_key, "die", side_effect=SystemExit) as die, self.assertRaises(SystemExit):
+            rivian_key.resolve_place("Gym", [{"name": "Gym", "coordinate": None}])
+        self.assertIn("no coordinates", die.call_args.args[0])
+
+    def test_only_home_and_work_match_by_type(self):
+        saved = [{"name": "5 Pine St", "locationType": "RECENT", "coordinate": {"latitude": 1.0, "longitude": 2.0}}]
+        with patch.object(rivian_key, "die", side_effect=SystemExit), self.assertRaises(SystemExit):
+            rivian_key.resolve_place("recent", saved)
+
+    def test_unknown_place_lists_saved_names(self):
+        with patch.object(rivian_key, "die", side_effect=SystemExit) as die, self.assertRaises(SystemExit):
+            rivian_key.resolve_place("Work", self.SAVED)
+        self.assertIn("'Home'", die.call_args.args[0])
+
+
+if __name__ == "__main__":
+    unittest.main()

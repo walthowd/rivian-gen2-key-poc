@@ -4,6 +4,7 @@ keys/
 logs/
 *.log
 *.pcap
+*.har
 *.pcapng
 *.snoop
 

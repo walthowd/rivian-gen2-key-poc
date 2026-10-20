@@ -129,6 +129,42 @@ python rivian_key.py command cabin_hvac_left_seat_heat 3
 Seen working: `lock`, `unlock`, `windows_open`, `windows_close` (and `wake` is accepted). The
 rest come from rivian-python-client and haven't been tried with this POC yet; please report. If the vehicle is asleep, send `wake` first.
 
+### Navigation
+
+Start navigation on the vehicle, or send a whole trip with charging stops. These only need a
+signed-in session (not a paired key), and wake the vehicle if it is asleep.
+
+```bash
+python rivian_key.py navigate "Arrowhead Stadium"                                          # one destination
+python rivian_key.py trip --dry-run "Arrowhead Stadium" "44.9737,-93.2581=U.S. Bank Stadium"  # plan and show only
+python rivian_key.py trip "Arrowhead Stadium" "44.9737,-93.2581=U.S. Bank Stadium"            # send the trip
+python rivian_key.py trip --add "40.9640,-91.5510=Coffee stop"                               # add as the next stop
+python rivian_key.py trip --add "Arrowhead Stadium" --at end                                 # or as the last stop (or --at 2, …)
+python rivian_key.py trip --end                                                            # stop navigating
+```
+
+A place is one of:
+
+| You type | Meaning |
+|---|---|
+| `"Arrowhead Stadium"` | a saved or recent location by name: the list the Rivian app keeps (favorites and places you navigated to) |
+| `Home`, `Work` | your saved home / work |
+| `"44.9737,-93.2581=U.S. Bank Stadium"` | coordinates, with an optional name after `=` |
+| a Google Maps share link | `navigate` only |
+
+There is no search by name yet. For coordinates, right-click the spot in Google Maps (or press
+and hold on a phone) and copy the `lat, lng` shown. Once you've navigated somewhere, it is a
+recent location and works by name.
+
+`trip` replaces any trip the vehicle is navigating. It sends the stops the way the app's trip
+planner does; the vehicle plans the route and charging stops itself (minimum arrival charge `--arrive`, default 20%). Before sending it shows
+Rivian's plan as a preview; afterwards it prints the route and charging stops the vehicle
+actually planned. `--add` reads the stops of the trip the vehicle is navigating (started here, in
+the app or on the vehicle), inserts the new places (next by default, `--at end` or `--at N`)
+and sends the result. Each command waits
+until the vehicle itself reports the change, usually within 30 seconds; `navigate` and `trip`
+re-send if the vehicle missed it (it sometimes does while falling asleep).
+
 ### Halloween (Ghostbusters costume)
 
 When the vehicle offers the seasonal Ghostbusters mode:

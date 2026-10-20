@@ -9,6 +9,9 @@
   status                is the key paired with the vehicle?
   command CMD [VALUE]   send a command signed with the key (honk, lock, ...; --list for all)
   halloween ACTION      Ghostbusters costume: on/off, show, sound, music, volume, lights
+  navigate PLACE        send one destination to the vehicle's navigation
+  trip PLACE [PLACE…]   plan a trip (with charging stops) and send it to the vehicle;
+                        --add adds stops to the active trip, --end stops it
   remove                unregister the key and delete it locally
 
 With more than one key, pick it with --key NAME.
@@ -36,6 +39,7 @@ from rivian.exceptions import RivianPhoneLimitReachedError
 from rivian.utils import generate_key_pair
 
 import halloween
+import trip
 from common import KEYS_DIR, ROOT, SESSION_FILE, derive_secret, die, key_names, key_path, load_json, load_key, load_session, log, save_json
 
 # Short names for common commands; every rivian-python-client command also works by its
@@ -360,6 +364,174 @@ async def cmd_command(args):
         await api.close()
 
 
+PLACE_RE = re.compile(r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*(?:=\s*(.+))?")
+
+
+def resolve_place(text, saved):
+    """A stop from "LAT,LNG[=Name]" or the name of a saved location (Home, Work, favorites)."""
+    if match := PLACE_RE.fullmatch(text):
+        lat, lng, name = match.groups()
+        return {"name": name or f"{lat},{lng}", "latitude": float(lat), "longitude": float(lng)}
+    if not text.strip():
+        die("empty place name")
+    for place in saved:
+        kind = {"FAVORITE_HOME": "home", "FAVORITE_WORK": "work"}.get(place.get("locationType"))
+        if text.lower() in (kind, (place.get("userGivenName") or "").lower(), (place.get("name") or "").lower()):
+            name = place.get("userGivenName") or (text.title() if text.lower() == kind else place["name"])
+            coordinate = place.get("coordinate") or {}
+            if coordinate.get("latitude") is None or coordinate.get("longitude") is None:
+                die(f"{name!r} has no coordinates in your saved locations")
+            return {"name": name, "address": place.get("address"), "place_id": place.get("id"),  # a Google place id
+                    "latitude": coordinate["latitude"], "longitude": coordinate["longitude"]}
+    names = ", ".join(dict.fromkeys(repr(p.get("userGivenName") or p.get("name")) for p in saved)) or "none"
+    die(f"{text!r}: not LAT,LNG[=Name] or a saved location (saved: {names})")
+
+
+async def places(api, user, vehicle, texts):
+    saved = [] if all(PLACE_RE.fullmatch(t) for t in texts) else \
+        await trip.saved_locations(api, user["id"], vehicle["id"])
+    return [resolve_place(text, saved) for text in texts]
+
+
+async def cmd_navigate(args):
+    api = await connect()
+    try:
+        user = await current_user(api)
+        vehicle = pick_vehicle(user, args.vehicle)
+        if args.place.startswith(("https://", "http://", "geo:")):  # e.g. a Google Maps share link
+            place = {"name": args.place, "url": args.place}
+        else:
+            [place] = await places(api, user, vehicle, [args.place])
+        async with trip.TripWatcher(api, vehicle["id"]) as watch:
+            ok = await start_navigation(api, vehicle, place, watch)
+        print(f"{place['name']}: {'the vehicle is navigating there' if ok else 'not confirmed by the vehicle'}")
+        return ok
+    finally:
+        await api.close()
+
+
+async def start_navigation(api, vehicle, place, watch):
+    """Share one place with the vehicle and wait until it reports navigating to it. A share that
+    reaches the vehicle while it is going to sleep gets lost (the app needs retries too)."""
+    before = watch.route
+    for attempt in range(1, 4):
+        if not await trip.share_location(api, vehicle["id"], place):
+            die(f"Rivian refused to send {place['name']!r}")
+        print(f"sent {place['name']!r}{f' (try {attempt})' if attempt > 1 else ''}; "
+              "waiting for the vehicle to start navigating (wakes it if asleep)…")
+        if await watch.wait(lambda route: route and route != before, 60):
+            return True
+    return False
+
+
+def trip_summary(plan, stops):
+    """Rivian's plan, as a preview (the vehicle plans its own route and charging)."""
+    def num(value, scale=1, fmt=".0f"):
+        return "?" if value is None else format(value / scale, fmt)
+    summary, user_stops = plan.get("summary") or {}, iter(stops)
+    print(f"plan: {num(summary.get('totalDriveDistanceMeters'), 1609.344)} mi, "
+          f"{num(summary.get('totalTripDurationSeconds'), 3600, '.1f')} h including "
+          f"{num(summary.get('totalChargeDurationSeconds'), 60)} min charging, "
+          f"arriving with {num(summary.get('arrivalSOCPercent'))}%"
+          f"{' (DESTINATION NOT REACHABLE)' if summary.get('destinationReachable') is False else ''}")
+    for waypoint in plan.get("waypoints", [])[1:]:
+        if waypoint.get("isSystemAdded") and waypoint.get("charger"):
+            charger = waypoint["charger"]
+            print(f"  charge: {charger.get('name')} ({num(charger.get('chargeDurationSeconds'), 60)} min, "
+                  f"arrive {num(waypoint.get('arrivalSOCPercent'))}%)")
+        else:
+            print(f"  stop:   {next(user_stops, {'name': '?'})['name']} "
+                  f"(arrive {num(waypoint.get('arrivalSOCPercent'))}%)")
+
+
+def insert_position(at, count):
+    """Where --add puts new stops among `count` current ones: "next", "end" or stop number N."""
+    if at == "next":
+        return 0
+    if at == "end":
+        return count
+    if at.isdigit() and 1 <= int(at) <= count + 1:
+        return int(at) - 1
+    die(f"--at: next, end or a stop number 1-{count + 1}")
+
+
+async def cmd_trip(args):
+    if not args.end and not args.places:
+        die("give one or more places (LAT,LNG[=Name] or a saved location), or --end")
+    if args.end and args.add:
+        die("--add and --end don't go together")
+    if args.at and not args.add:
+        die("--at only goes with --add")
+    if args.at and not (args.at in ("next", "end") or args.at.isdigit()):
+        die("--at: next, end or a stop number")
+    api = await connect()
+    try:
+        user = await current_user(api)
+        vehicle = pick_vehicle(user, args.vehicle)
+        if args.end:
+            async with trip.TripWatcher(api, vehicle["id"]) as watch:
+                if watch.route == b"":
+                    print("the vehicle isn't navigating")
+                    return True
+                if not await trip.send_trip(api, vehicle["id"], trip.end_trip_message(user["id"])):
+                    die("Rivian refused to end the trip")
+                ok = await watch.wait(lambda route: route == b"", 90)
+            print("trip ended" if ok else "end trip: not confirmed by the vehicle")
+            return ok
+        stops = await places(api, user, vehicle, args.places)
+        if args.add:
+            async with trip.TripWatcher(api, vehicle["id"]) as watch:
+                current = trip.active_stops(watch.route)
+            if watch.route is None:
+                die("no trip status from the vehicle — is it online? try again in a minute")
+            if not current:
+                die("the vehicle isn't navigating — start a trip first (or leave out --add)")
+            at = insert_position(args.at or "next", len(current))
+            stops = current[:at] + stops + current[at:]
+            print("new stops: " + " → ".join(s["name"] for s in stops))
+        lat, lng, soc = await trip.vehicle_position(api, vehicle["id"])
+        if lat is None or soc is None:
+            die("the vehicle hasn't reported its location and charge — wake it and try again")
+        status, plans = await trip.plan(api, vehicle["id"], {"latitude": lat, "longitude": lng}, stops,
+                                        soc, args.arrive)
+        if not plans:
+            die(f"Rivian couldn't plan that trip (status {status})")
+        trip_summary(plans[0], stops)
+        if args.dry_run:
+            return True
+        # Like the app's trip planner: send the stops, the vehicle plans route and charging itself
+        # (it may pick other chargers than the preview above).
+        async with trip.TripWatcher(api, vehicle["id"]) as watch:
+            ended = bool(watch.route)
+            if watch.route:
+                # The vehicle merges a trip into the active one (new stops first, then the others), so
+                # end that first and send the complete list: the order is then exactly ours.
+                print("ending the vehicle's current trip first…")
+                if not await trip.send_trip(api, vehicle["id"], trip.end_trip_message(user["id"])) or \
+                        not await watch.wait(lambda route: route == b"", 90):
+                    die("couldn't end the vehicle's current trip; try `trip --end`, then this again")
+            before, ok = watch.route, False
+            for attempt in range(1, 4):  # a trip arriving while the vehicle falls asleep is lost
+                if not await trip.send_trip_to_vehicle(api, vehicle["id"], {"latitude": lat, "longitude": lng},
+                                                       stops, args.arrive):
+                    die("Rivian refused the trip")
+                print(f"sent{f' (try {attempt})' if attempt > 1 else ''}; waiting for the vehicle to plan it "
+                      "(wakes it if asleep)…")
+                if ok := await watch.wait(lambda route: route and route != before, 60):
+                    await watch.wait(lambda route: False, 15)  # it publishes the charging plan a few seconds later
+                    break
+        if not ok:
+            print("trip not confirmed by the vehicle" +
+                  (" (its previous trip was ended); run this again" if ended else ""))
+            return False
+        print("the vehicle is navigating: " + " → ".join(s["name"] for s in trip.active_stops(watch.route)))
+        for name, minutes in trip.active_chargers(watch.route):
+            print(f"  charging stop: {name} ({minutes} min)")
+        return ok
+    finally:
+        await api.close()
+
+
 async def cmd_halloween(args):
     try:
         op, params = halloween.operation(args.action, args.value, args.motion)
@@ -566,6 +738,18 @@ def main(argv=None):
     s.add_argument("value", nargs="?", help="for commands that need one (temperature, level, limit)")
     s.add_argument("--list", action="store_true", help="list every command")
     s.add_argument("--key", help="key name (only if you have several)")
+    s = sub.add_parser("navigate", help="send one destination to the vehicle")
+    s.add_argument("place", help='LAT,LNG[=Name] (e.g. "40.76,-91.14=Golf"), a saved location (Home, Work, …) '
+                   "or a link (Google Maps share link, geo:LAT,LNG)")
+    s.add_argument("--vehicle", help="vehicle name (only if you have several)")
+    s = sub.add_parser("trip", help="plan a trip with charging stops and send it to the vehicle")
+    s.add_argument("places", nargs="*", help="stops in order: LAT,LNG[=Name] or saved location names")
+    s.add_argument("--arrive", type=float, default=20, help="minimum charge %% at the final stop (default 20)")
+    s.add_argument("--dry-run", action="store_true", help="plan and show the trip, but don't send it")
+    s.add_argument("--add", action="store_true", help="add the places to the trip the vehicle is navigating")
+    s.add_argument("--at", help="with --add: next (default), end, or the stop number the new place becomes")
+    s.add_argument("--end", action="store_true", help="end the trip running on the vehicle")
+    s.add_argument("--vehicle", help="vehicle name (only if you have several)")
     s = sub.add_parser("halloween", help="Ghostbusters car costume: " + halloween.USAGE)
     s.add_argument("action", choices=["on", "off", "show", "sound", "music", "volume", "lights"])
     s.add_argument("value", nargs="?", help="show name, sound 1-8, track/off, volume, on/off")
@@ -579,7 +763,7 @@ def main(argv=None):
     log_path = log.open(f"rivian_key-{args.cmd}")
     handler = {"setup": cmd_setup, "login": cmd_login, "enroll": cmd_enroll, "import-ha": cmd_import_ha,
                "status": cmd_status, "command": cmd_command, "halloween": cmd_halloween,
-               "remove": cmd_remove}[args.cmd]
+               "remove": cmd_remove, "navigate": cmd_navigate, "trip": cmd_trip}[args.cmd]
     try:
         result = asyncio.run(handler(args))
     except (KeyboardInterrupt, EOFError):
@@ -595,7 +779,7 @@ def main(argv=None):
     except Exception as error:  # noqa: BLE001 — rivian-python-client raises many types
         log.exception(f"error: {error_text(error)}")
     else:
-        return result if args.cmd == "setup" else 0
+        return result if args.cmd == "setup" else (1 if result is False else 0)
     if args.cmd == "setup":
         setup_help()  # already names the debug log
         return 1

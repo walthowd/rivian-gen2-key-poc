@@ -166,6 +166,62 @@ Halloween operations (prefix `holiday_celebration.car_costume.`), params as prot
 - **Not covered:** the encrypted S/T channel for local (no-cloud) commands and passive entry.
   Their message formats are not documented here yet.
 
+### Navigation (cloud only, no key)
+
+Seen in the app's traffic and confirmed on a Gen 2 R1S; nothing is signed with the key.
+
+- **The vehicle reports its route** on the `parallaxMessages` subscription, topic
+  `navigation.navigation_service.trip_info` (protobuf; empty when not navigating, destination
+  names and place ids appear as plain strings), plus `…trip_progress` every 5 s while
+  navigating. The cloud answers success for anything, so this is the only real confirmation.
+- **Send one place (starts navigating):** `ParseAndShareLocationToVehicle(str, vehicleId, requiresWakeup)` where `str`
+  is a link like `https://telenav.id/entity?geo_coordinates=LAT,LNG&entity_id=<Google place
+  id>&name=…&nav_coordinates=LAT,LNG&address=…&source_type=telenav`. Success is
+  `publishResponse.result == 0`. Rivian returns INTERNAL_SERVER_ERROR for a telenav link without
+  `entity_id`; Google Maps links and `geo:` URIs are accepted too. `requiresWakeup` wakes the
+  vehicle; it shows the route ~30 s later. A share arriving while the vehicle goes to sleep is
+  lost (no error), so wait for `trip_info` and re-send.
+- **Send a trip (what `trip` uses):** `sendTripToVehicle(attrs: { vehicleId, requiresWakeup,
+  routePreferences { avoidFerries, avoidHighways, avoidTolls }, preferences { avoidAdapterRequired,
+  networks: [{ networkId }] }, waypoints: [{ address: { address, addressSourceId (Google place
+  id), addressSourceType: "google", latitude, longitude, name }, minArrivalSoC (last stop) }] })`
+  with the vehicle's location as the first waypoint (`name: "Vehicle location"`, empty ids).
+  Returns `true`. The vehicle plans the route and charging stops itself and starts navigating;
+  its `trip_info` then holds destinations at `3.3.1` and charging stops at `3.3.2 = { 1: charger
+  id, 2: name, 3: { 1: lat, 2: lng }, 4: charge seconds, 6: arrival SoC, … }`, plus the starting
+  SoC at top-level field 5. This is the app's trip planner "Go".
+  **If a trip is already active, the vehicle merges:** the new stops go first and existing stops
+  not in the new list are kept after them. To replace a trip, end it first (the app's planner
+  starts from no active trip); to add a stop, this merge is all you need.
+- **Replace the active route with a pre-planned one (older app path):** plan with `PlanTrip2` (waypoints: the vehicle's location first, then the stops;
+  start SoC, arrival SoC, charging networks), then `SendUpdatedTrip`, a `sendParallaxPayload` with
+  `meta { model: "c2v_navigation.trip_copilot.updated_trip", isVehicleModelOp: false,
+  requiresWakeup: true }` and this unsigned payload:
+
+```
+payload   { 10: { 2: trip }, 12: {1: sec, 2: nanos}, 16: request id (16) }      (no field 17)
+trip      { 1: route, 2: settings, 3: { 1: user id } }
+route     { 1: plan.planIdentifierMetadata.abrpRouteId, 2: leg (repeated) }
+leg       { 1: legs[i].abrpLegId, 2: legs[i].routeRequest ("v1:{…route_token…}"), 3: destination }
+destination { 1: name, 2: { 1: lat (double), 2: lng (double) }, 3: place id or charger entityId,
+              4: 1, 5: 1 (both only on charging stops the planner added) }
+settings  { 1: arrival SoC (float), 2: arrival SoC (float), 3: "switchExcludeMotorway:false" …,
+            4: "switchTeslaFilter:true" … (charging network filters) }
+```
+
+  Destination `i` is `plan.waypoints[i + 1]` (index 0 is the start). Rebuilding a captured
+  trip from its `PlanTrip2` response this way matches the app's bytes exactly.
+  **The vehicle ignores an updated trip when it isn't navigating**, so share the first stop
+  first (as the app did), wait for `trip_info`, then send the trip. The vehicle then navigates
+  the user's stops but drops the planned charging stops and has no charge estimates (the app
+  shows arrival range "0% · --"); `sendTripToVehicle` doesn't have that problem.
+- **Add a stop to the active route:** sending just the new stop via `sendTripToVehicle` puts it
+  first (the merge above). `trip --add` instead reads the active destinations from `trip_info`
+  (field 3, each `3.3.1 = { 1: { 1: lat, 2: lng } (doubles), 4: name, 5: place id }`), inserts the
+  new stop where asked, ends the trip and sends the complete list, so the order is exactly ours.
+- **End the trip:** the same message with `trip { 1: { 1: "end_trip_<unix ms>" }, 2: empty,
+  3: { 1: user id } }`. Works whether the vehicle is awake or asleep; `trip_info` becomes empty.
+
 ## Things that are NOT needed
 
 - No extra cloud call after the BLE handshake (`EnrollKeyFob` is the hardware-fob path, unrelated).
