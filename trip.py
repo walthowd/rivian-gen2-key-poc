@@ -4,6 +4,8 @@ As seen in the app's traffic and confirmed on a vehicle (no paired key needed, o
 signed-in session):
 - ParseAndShareLocationToVehicle ("send to vehicle", a telenav.id link) starts navigating to
   one place, waking the vehicle if needed.
+- sendTripToVehicle (the app's trip planner "Go") sends the stops; the vehicle plans the route
+  and charging stops itself, with arrival charge estimates. Used by `trip`.
 - SendUpdatedTrip (PlanTrip2's plan as a SendParallaxPayload with model
   c2v_navigation.trip_copilot.updated_trip, unsigned) replaces the route the vehicle is already
   navigating, e.g. with more stops and charging stops. With no route active it is ignored.
@@ -23,7 +25,7 @@ from protocol import f_len, f_var, parse_fields
 TRIP_MODEL = "c2v_navigation.trip_copilot.updated_trip"
 TRIP_INFO = "navigation.navigation_service.trip_info"  # the vehicle's active route; empty when not navigating
 # What the app sent: charging networks it plans with, and the matching filter switches.
-NETWORKS = ("10001", "10025", "10027", "10030", "10031", "10056", "10050")
+NETWORKS = ("10001", "10025", "10027", "10030", "10031", "10032", "10056", "10045", "10050", "10002", "10033")
 SWITCHES = ("switchExcludeMotorway:false", "switchExcludeFerry:false", "switchExcludeToll:false")
 FILTERS = ("switchAvoidAdapterRequired:false", "switchRivianFilter:true", "switchChargePointFilter:false",
            "switchElectrifyAmericaFilter:false", "switchEVConnectFilter:false", "switchEVgoFilter:false",
@@ -82,6 +84,35 @@ def active_stops(route):
                 if not stops or stops[-1]["name"] != stop["name"]:
                     stops.append(stop)
     return stops
+
+
+def active_chargers(route):
+    """Charging stops the vehicle planned into its route: (name, minutes charging), in order.
+    They sit next to the destinations at 3.3.2 = {1: charger id, 2: name, 4: seconds, ...}."""
+    chargers = []
+    for leg in parse_fields(route).get(3, []) if route else []:
+        for wrapper in parse_fields(leg).get(3, []):
+            for charger in parse_fields(wrapper).get(2, []):
+                fields = parse_fields(charger)
+                if 2 in fields:
+                    seconds = struct.unpack("<d", fields[4][0])[0] if 4 in fields else 0
+                    chargers.append((fields[2][0].decode(), round(seconds / 60)))
+    return chargers
+
+
+def trip_waypoints(origin, stops, target_soc):
+    """sendTripToVehicle waypoints, as the app sends them: the vehicle first, then the stops."""
+    def waypoint(stop):
+        address = {"address": stop.get("address") or "", "addressSourceId": stop.get("place_id") or "",
+                   "latitude": stop["latitude"], "longitude": stop["longitude"], "name": stop["name"]}
+        if stop.get("place_id"):
+            address["addressSourceType"] = "google"
+        return {"address": address}
+    waypoints = [{"address": {"address": "", "addressSourceId": "", "latitude": origin["latitude"],
+                              "longitude": origin["longitude"], "name": "Vehicle location"}}]
+    waypoints += [waypoint(stop) for stop in stops]
+    waypoints[-1]["minArrivalSoC"] = target_soc
+    return waypoints
 
 
 def plan_variables(vehicle_id, origin, stops, soc, target_soc):
@@ -179,6 +210,17 @@ async def plan(api, vehicle_id, origin, stops, soc, target_soc):
     data = await gql(api, "PlanTrip2", PLAN_QUERY, plan_variables(vehicle_id, origin, stops, soc, target_soc))
     result = data.get("planTrip2") or {}
     return result.get("status"), result.get("plans") or []
+
+
+async def send_trip_to_vehicle(api, vehicle_id, origin, stops, target_soc):
+    data = await gql(api, "sendTripToVehicle",
+                     "mutation sendTripToVehicle($attrs: SendTripToVehicleInput!) { sendTripToVehicle(attrs: $attrs) }",
+                     {"attrs": {
+                         "preferences": {"avoidAdapterRequired": False, "networks": [{"networkId": n} for n in NETWORKS]},
+                         "requiresWakeup": True,
+                         "routePreferences": {"avoidFerries": False, "avoidHighways": False, "avoidTolls": False},
+                         "vehicleId": vehicle_id, "waypoints": trip_waypoints(origin, stops, target_soc)}})
+    return bool(data.get("sendTripToVehicle"))
 
 
 async def send_trip(api, vehicle_id, trip):

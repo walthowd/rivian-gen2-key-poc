@@ -473,17 +473,25 @@ async def cmd_trip(args):
         trip_summary(plans[0], stops)
         if args.dry_run:
             return True
-        # The vehicle only takes a trip as an update to the route it is navigating, so start
-        # navigating to the first stop (like the app's "send to vehicle"), then replace the route.
+        # Like the app's trip planner: send the stops, the vehicle plans route and charging itself
+        # (it may pick other chargers than the preview above).
         async with trip.TripWatcher(api, vehicle["id"]) as watch:
-            if not args.add and not await start_navigation(api, vehicle, stops[0], watch):
-                die("the vehicle didn't start navigating — is it online? try again in a minute")
-            started = watch.route
-            message = trip.trip_message(plans[0], stops, user["id"], args.arrive)
-            if not await trip.send_trip(api, vehicle["id"], message):
-                die("Rivian refused the trip")
-            ok = await watch.wait(lambda route: route and route != started, 60)
-        print("the vehicle is navigating this trip" if ok else "trip not confirmed by the vehicle")
+            before, ok = watch.route, False
+            for attempt in range(1, 4):  # a trip arriving while the vehicle falls asleep is lost
+                if not await trip.send_trip_to_vehicle(api, vehicle["id"], {"latitude": lat, "longitude": lng},
+                                                       stops, args.arrive):
+                    die("Rivian refused the trip")
+                print(f"sent{f' (try {attempt})' if attempt > 1 else ''}; waiting for the vehicle to plan it "
+                      "(wakes it if asleep)…")
+                if ok := await watch.wait(lambda route: route and route != before, 60):
+                    await watch.wait(lambda route: False, 15)  # it publishes the charging plan a few seconds later
+                    break
+        if not ok:
+            print("trip not confirmed by the vehicle")
+            return False
+        print("the vehicle is navigating: " + " → ".join(s["name"] for s in trip.active_stops(watch.route)))
+        for name, minutes in trip.active_chargers(watch.route):
+            print(f"  charging stop: {name} ({minutes} min)")
         return ok
     finally:
         await api.close()

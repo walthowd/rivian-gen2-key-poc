@@ -181,7 +181,16 @@ Seen in the app's traffic and confirmed on a Gen 2 R1S; nothing is signed with t
   `entity_id`; Google Maps links and `geo:` URIs are accepted too. `requiresWakeup` wakes the
   vehicle; it shows the route ~30 s later. A share arriving while the vehicle goes to sleep is
   lost (no error), so wait for `trip_info` and re-send.
-- **Send a trip (replaces the active route):** plan with `PlanTrip2` (waypoints: the vehicle's location first, then the stops;
+- **Send a trip (what `trip` uses):** `sendTripToVehicle(attrs: { vehicleId, requiresWakeup,
+  routePreferences { avoidFerries, avoidHighways, avoidTolls }, preferences { avoidAdapterRequired,
+  networks: [{ networkId }] }, waypoints: [{ address: { address, addressSourceId (Google place
+  id), addressSourceType: "google", latitude, longitude, name }, minArrivalSoC (last stop) }] })`
+  with the vehicle's location as the first waypoint (`name: "Vehicle location"`, empty ids).
+  Returns `true`. The vehicle plans the route and charging stops itself and starts navigating;
+  its `trip_info` then holds destinations at `3.3.1` and charging stops at `3.3.2 = { 1: charger
+  id, 2: name, 3: { 1: lat, 2: lng }, 4: charge seconds, 6: arrival SoC, … }`, plus the starting
+  SoC at top-level field 5. This is the app's trip planner "Go".
+- **Replace the active route with a pre-planned one (older app path):** plan with `PlanTrip2` (waypoints: the vehicle's location first, then the stops;
   start SoC, arrival SoC, charging networks), then `SendUpdatedTrip`, a `sendParallaxPayload` with
   `meta { model: "c2v_navigation.trip_copilot.updated_trip", isVehicleModelOp: false,
   requiresWakeup: true }` and this unsigned payload:
@@ -200,11 +209,12 @@ settings  { 1: arrival SoC (float), 2: arrival SoC (float), 3: "switchExcludeMot
   Destination `i` is `plan.waypoints[i + 1]` (index 0 is the start). Rebuilding a captured
   trip from its `PlanTrip2` response this way matches the app's bytes exactly.
   **The vehicle ignores an updated trip when it isn't navigating**, so share the first stop
-  first (as the app does), wait for `trip_info`, then send the trip. The vehicle's route then
-  lists the user's stops; the planner's charging stops don't appear by name in `trip_info`.
-  To add a stop to the active route, read its destinations from `trip_info` (each leg is field
-  3, its destination `3.1 = { 1: { 1: lat, 2: lng } (doubles), 4: name, 5: place id }`), plan
-  again with the new stop included and send the trip; no share needed since a route is active.
+  first (as the app did), wait for `trip_info`, then send the trip. The vehicle then navigates
+  the user's stops but drops the planned charging stops and has no charge estimates (the app
+  shows arrival range "0% · --"); `sendTripToVehicle` doesn't have that problem.
+- **Add a stop to the active route:** read its destinations from `trip_info` (field 3, each
+  `3.3.1 = { 1: { 1: lat, 2: lng } (doubles), 4: name, 5: place id }`) and send them, with the new
+  stop, via `sendTripToVehicle`.
 - **End the trip:** the same message with `trip { 1: { 1: "end_trip_<unix ms>" }, 2: empty,
   3: { 1: user id } }`. Works whether the vehicle is awake or asleep; `trip_info` becomes empty.
 

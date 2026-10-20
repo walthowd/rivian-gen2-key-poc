@@ -144,13 +144,13 @@ python rivian_key.py trip --add "40.9640,-91.5510=Coffee stop"                  
 python rivian_key.py trip --end                                                       # stop navigating
 ```
 
-`trip` plans from the vehicle's current location and charge, with charging stops like the app
-(minimum arrival charge `--arrive`, default 20%). Like the app, it first sends the first stop to
-start navigating, then replaces that route with the whole trip. `--add` reads the stops of the
-trip the vehicle is navigating (whether you started it here, in the app or on the vehicle), puts
-the new places first, re-plans and sends the result. Each command waits until the
-vehicle itself reports the new route (or that it stopped navigating), usually within 30 seconds,
-and re-sends if the vehicle missed it.
+`trip` sends the stops the way the app's trip planner does; the vehicle plans the route and
+charging stops itself (minimum arrival charge `--arrive`, default 20%). Before sending it shows
+Rivian's plan as a preview; afterwards it prints the route and charging stops the vehicle
+actually planned. `--add` reads the stops of the trip the vehicle is navigating (started here, in
+the app or on the vehicle), puts the new places first and sends the result. Each command waits
+until the vehicle itself reports the change, usually within 30 seconds, and re-sends if the
+vehicle missed it (it sometimes does while falling asleep).
 
 ### Halloween (Ghostbusters costume)
 

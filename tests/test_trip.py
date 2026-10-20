@@ -61,6 +61,16 @@ class TripMessages(unittest.TestCase):
         self.assertEqual(len(outer[16][0]), 16)
         self.assertNotIn(17, outer)  # no signature: trips aren't signed with the key
 
+    def test_trip_waypoints_like_the_app(self):
+        waypoints = trip.trip_waypoints({"latitude": 1.0, "longitude": 2.0}, STOPS, 20)
+        self.assertEqual(waypoints[0], {"address": {"address": "", "addressSourceId": "", "latitude": 1.0,
+                                                    "longitude": 2.0, "name": "Vehicle location"}})
+        self.assertEqual(waypoints[1]["address"]["addressSourceId"], "ChIJgolf")
+        self.assertEqual(waypoints[1]["address"]["addressSourceType"], "google")
+        self.assertNotIn("addressSourceType", waypoints[2]["address"])
+        self.assertNotIn("minArrivalSoC", waypoints[1])
+        self.assertEqual(waypoints[2]["minArrivalSoC"], 20)
+
     def test_share_url(self):
         query = parse_qs(urlparse(trip.share_url(STOPS[0])).query)
         self.assertEqual(query["geo_coordinates"], ["40.5,-91.5"])
@@ -85,6 +95,13 @@ class ActiveStops(unittest.TestCase):
         self.assertEqual(trip.active_stops(route), [
             {"name": "Golf", "place_id": "ChIJgolf", "latitude": 40.5, "longitude": -91.5},
             {"name": "Stadium", "place_id": None, "latitude": 39.0, "longitude": -94.5}])
+
+    def test_chargers_the_vehicle_planned(self):
+        from protocol import f_len
+        charger = f_len(1, b"id-1") + f_len(2, b"Town [Tesla]") + f_len(3, b"") + trip.f_double(4, 2520.0)
+        route = f_len(3, f_len(3, f_len(1, b"x")) + f_len(3, f_len(2, charger)))
+        self.assertEqual(trip.active_chargers(route), [("Town [Tesla]", 42)])
+        self.assertEqual(trip.active_chargers(b""), [])
 
     def test_not_navigating(self):
         self.assertEqual(trip.active_stops(b""), [])
