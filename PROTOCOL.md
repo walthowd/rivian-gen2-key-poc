@@ -166,6 +166,35 @@ Halloween operations (prefix `holiday_celebration.car_costume.`), params as prot
 - **Not covered:** the encrypted S/T channel for local (no-cloud) commands and passive entry.
   Their message formats are not documented here yet.
 
+### Navigation (cloud only, no key)
+
+Seen in the app's traffic; neither is signed with the key.
+
+- **Send one place:** `ParseAndShareLocationToVehicle(str, vehicleId, requiresWakeup)` where `str`
+  is a link like `https://telenav.id/entity?geo_coordinates=LAT,LNG&entity_id=<Google place
+  id>&name=…&nav_coordinates=LAT,LNG&address=…&source_type=telenav`. Success is
+  `publishResponse.result == 0`.
+- **Send a trip:** plan with `PlanTrip2` (waypoints: the vehicle's location first, then the stops;
+  start SoC, arrival SoC, charging networks), then `SendUpdatedTrip`, a `sendParallaxPayload` with
+  `meta { model: "c2v_navigation.trip_copilot.updated_trip", isVehicleModelOp: false,
+  requiresWakeup: true }` and this unsigned payload:
+
+```
+payload   { 10: { 2: trip }, 12: {1: sec, 2: nanos}, 16: request id (16) }      (no field 17)
+trip      { 1: route, 2: settings, 3: { 1: user id } }
+route     { 1: plan.planIdentifierMetadata.abrpRouteId, 2: leg (repeated) }
+leg       { 1: legs[i].abrpLegId, 2: legs[i].routeRequest ("v1:{…route_token…}"), 3: destination }
+destination { 1: name, 2: { 1: lat (double), 2: lng (double) }, 3: place id or charger entityId,
+              4: 1, 5: 1 (both only on charging stops the planner added) }
+settings  { 1: arrival SoC (float), 2: arrival SoC (float), 3: "switchExcludeMotorway:false" …,
+            4: "switchTeslaFilter:true" … (charging network filters) }
+```
+
+  Destination `i` is `plan.waypoints[i + 1]` (index 0 is the start). Rebuilding a captured
+  trip from its `PlanTrip2` response this way matches the app's bytes exactly.
+- **End the trip:** the same message with `trip { 1: { 1: "end_trip_<unix ms>" }, 2: empty,
+  3: { 1: user id } }`.
+
 ## Things that are NOT needed
 
 - No extra cloud call after the BLE handshake (`EnrollKeyFob` is the hardware-fob path, unrelated).

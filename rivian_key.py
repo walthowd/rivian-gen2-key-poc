@@ -9,6 +9,8 @@
   status                is the key paired with the vehicle?
   command CMD [VALUE]   send a command signed with the key (honk, lock, ...; --list for all)
   halloween ACTION      Ghostbusters costume: on/off, show, sound, music, volume, lights
+  navigate PLACE        send one destination to the vehicle's navigation
+  trip PLACE [PLACE…]   plan a trip (with charging stops) and send it to the vehicle; --end stops it
   remove                unregister the key and delete it locally
 
 With more than one key, pick it with --key NAME.
@@ -36,6 +38,7 @@ from rivian.exceptions import RivianPhoneLimitReachedError
 from rivian.utils import generate_key_pair
 
 import halloween
+import trip
 from common import KEYS_DIR, ROOT, SESSION_FILE, derive_secret, die, key_names, key_path, load_json, load_key, load_session, log, save_json
 
 # Short names for common commands; every rivian-python-client command also works by its
@@ -360,6 +363,92 @@ async def cmd_command(args):
         await api.close()
 
 
+PLACE_RE = re.compile(r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*(?:=\s*(.+))?")
+
+
+def resolve_place(text, saved):
+    """A stop from "LAT,LNG[=Name]" or the name of a saved location (Home, Work, favorites)."""
+    if match := PLACE_RE.fullmatch(text):
+        lat, lng, name = match.groups()
+        return {"name": name or f"{lat},{lng}", "latitude": float(lat), "longitude": float(lng)}
+    for place in saved:
+        kind = (place.get("locationType") or "").removeprefix("FAVORITE_").lower()  # FAVORITE_HOME: "home"
+        if text.lower() in (kind, (place.get("userGivenName") or "").lower(), (place.get("name") or "").lower()):
+            coordinate = place["coordinate"]
+            return {"name": place.get("userGivenName") or (text.title() if text.lower() == kind else place["name"]),
+                    "address": place.get("address"), "place_id": place.get("id"),  # a Google place id
+                    "latitude": coordinate["latitude"], "longitude": coordinate["longitude"]}
+    names = ", ".join(dict.fromkeys(repr(p.get("userGivenName") or p.get("name")) for p in saved)) or "none"
+    die(f"{text!r}: not LAT,LNG[=Name] or a saved location (saved: {names})")
+
+
+async def places(api, user, vehicle, texts):
+    saved = [] if all(PLACE_RE.fullmatch(t) for t in texts) else \
+        await trip.saved_locations(api, user["id"], vehicle["id"])
+    return [resolve_place(text, saved) for text in texts]
+
+
+async def cmd_navigate(args):
+    api = await connect()
+    try:
+        user = await current_user(api)
+        vehicle = pick_vehicle(user, args.vehicle)
+        if args.place.startswith(("https://", "http://", "geo:")):  # e.g. a Google Maps share link
+            place = {"name": args.place, "url": args.place}
+        else:
+            [place] = await places(api, user, vehicle, [args.place])
+        ok = await trip.share_location(api, vehicle["id"], place)
+        print(f"{place['name']}: {'sent to the vehicle' if ok else 'rejected'}")
+        return ok
+    finally:
+        await api.close()
+
+
+def trip_summary(plan, stops):
+    summary, user_stops = plan["summary"], iter(stops)
+    print(f"{summary['totalDriveDistanceMeters'] / 1609.344:.0f} mi, "
+          f"{summary['totalTripDurationSeconds'] / 3600:.1f} h including "
+          f"{summary['totalChargeDurationSeconds'] / 60:.0f} min charging, "
+          f"arriving with {summary['arrivalSOCPercent']:.0f}%"
+          f"{'' if summary['destinationReachable'] else ' (DESTINATION NOT REACHABLE)'}")
+    for waypoint in plan["waypoints"][1:]:
+        if waypoint.get("isSystemAdded") and waypoint.get("charger"):
+            charger = waypoint["charger"]
+            print(f"  charge: {charger['name']} ({charger['chargeDurationSeconds'] / 60:.0f} min, "
+                  f"arrive {waypoint['arrivalSOCPercent']:.0f}%)")
+        else:
+            print(f"  stop:   {next(user_stops)['name']} (arrive {waypoint['arrivalSOCPercent']:.0f}%)")
+
+
+async def cmd_trip(args):
+    if not args.end and not args.places:
+        die("give one or more places (LAT,LNG[=Name] or a saved location), or --end")
+    api = await connect()
+    try:
+        user = await current_user(api)
+        vehicle = pick_vehicle(user, args.vehicle)
+        if args.end:
+            ok = await trip.send_trip(api, vehicle["id"], trip.end_trip_message(user["id"]))
+            print("end trip: " + ("sent to the vehicle" if ok else "rejected"))
+            return ok
+        stops = await places(api, user, vehicle, args.places)
+        lat, lng, soc = await trip.vehicle_position(api, vehicle["id"])
+        if lat is None or soc is None:
+            die("the vehicle hasn't reported its location and charge — wake it and try again")
+        status, plans = await trip.plan(api, vehicle["id"], {"latitude": lat, "longitude": lng}, stops,
+                                        soc, args.arrive)
+        if not plans:
+            die(f"Rivian couldn't plan that trip (status {status})")
+        trip_summary(plans[0], stops)
+        if args.dry_run:
+            return True
+        ok = await trip.send_trip(api, vehicle["id"], trip.trip_message(plans[0], stops, user["id"], args.arrive))
+        print("trip: " + ("sent to the vehicle" if ok else "rejected"))
+        return ok
+    finally:
+        await api.close()
+
+
 async def cmd_halloween(args):
     try:
         op, params = halloween.operation(args.action, args.value, args.motion)
@@ -566,6 +655,16 @@ def main(argv=None):
     s.add_argument("value", nargs="?", help="for commands that need one (temperature, level, limit)")
     s.add_argument("--list", action="store_true", help="list every command")
     s.add_argument("--key", help="key name (only if you have several)")
+    s = sub.add_parser("navigate", help="send one destination to the vehicle")
+    s.add_argument("place", help='LAT,LNG[=Name] (e.g. "40.76,-91.14=Golf"), a saved location (Home, Work, …) '
+                   "or a link (Google Maps share link, geo:LAT,LNG)")
+    s.add_argument("--vehicle", help="vehicle name (only if you have several)")
+    s = sub.add_parser("trip", help="plan a trip with charging stops and send it to the vehicle")
+    s.add_argument("places", nargs="*", help="stops in order: LAT,LNG[=Name] or saved location names")
+    s.add_argument("--arrive", type=float, default=20, help="minimum charge %% at each stop (default 20)")
+    s.add_argument("--dry-run", action="store_true", help="plan and show the trip, but don't send it")
+    s.add_argument("--end", action="store_true", help="end the trip running on the vehicle")
+    s.add_argument("--vehicle", help="vehicle name (only if you have several)")
     s = sub.add_parser("halloween", help="Ghostbusters car costume: " + halloween.USAGE)
     s.add_argument("action", choices=["on", "off", "show", "sound", "music", "volume", "lights"])
     s.add_argument("value", nargs="?", help="show name, sound 1-8, track/off, volume, on/off")
@@ -579,7 +678,7 @@ def main(argv=None):
     log_path = log.open(f"rivian_key-{args.cmd}")
     handler = {"setup": cmd_setup, "login": cmd_login, "enroll": cmd_enroll, "import-ha": cmd_import_ha,
                "status": cmd_status, "command": cmd_command, "halloween": cmd_halloween,
-               "remove": cmd_remove}[args.cmd]
+               "remove": cmd_remove, "navigate": cmd_navigate, "trip": cmd_trip}[args.cmd]
     try:
         result = asyncio.run(handler(args))
     except (KeyboardInterrupt, EOFError):
