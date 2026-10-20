@@ -131,19 +131,23 @@ rest come from rivian-python-client and haven't been tried with this POC yet; pl
 
 ### Navigation
 
-Send a destination, or a whole trip with charging stops, to the vehicle's navigation. These
-only need a signed-in session (not a paired key). A place is `LAT,LNG=Name` or the name of a
-saved location (Home, Work, favorites):
+Start navigation on the vehicle, or send a whole trip with charging stops. These only need a
+signed-in session (not a paired key), and wake the vehicle if it is asleep. A place is the name
+of a saved or recent location (Home, Work, favorites, places you navigated to), `LAT,LNG=Name`,
+or (for `navigate`) a Google Maps share link:
 
 ```bash
-python rivian_key.py navigate "40.7603,-91.1447=Spirit Hollow Golf Course"
-python rivian_key.py trip --dry-run Home "39.0490,-94.4840=Arrowhead Stadium"   # plan and show only
-python rivian_key.py trip Home "39.0490,-94.4840=Arrowhead Stadium"             # plan and send
-python rivian_key.py trip --end                                                 # stop navigating
+python rivian_key.py navigate "Spirit Hollow Golf Course"
+python rivian_key.py trip --dry-run "Spirit Hollow Golf Course" "Arrowhead Stadium"   # plan and show only
+python rivian_key.py trip "Spirit Hollow Golf Course" "Arrowhead Stadium"             # plan and send
+python rivian_key.py trip --end                                                       # stop navigating
 ```
 
-`trip` plans from the vehicle's current location and charge, adds charging stops like the app
-does (minimum arrival charge `--arrive`, default 20%), and sends the first plan.
+`trip` plans from the vehicle's current location and charge, with charging stops like the app
+(minimum arrival charge `--arrive`, default 20%). Like the app, it first sends the first stop to
+start navigating, then replaces that route with the whole trip. Each command waits until the
+vehicle itself reports the new route (or that it stopped navigating), usually within 30 seconds,
+and re-sends if the vehicle missed it.
 
 ### Halloween (Ghostbusters costume)
 

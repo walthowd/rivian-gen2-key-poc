@@ -168,13 +168,20 @@ Halloween operations (prefix `holiday_celebration.car_costume.`), params as prot
 
 ### Navigation (cloud only, no key)
 
-Seen in the app's traffic; neither is signed with the key.
+Seen in the app's traffic and confirmed on a Gen 2 R1S; nothing is signed with the key.
 
-- **Send one place:** `ParseAndShareLocationToVehicle(str, vehicleId, requiresWakeup)` where `str`
+- **The vehicle reports its route** on the `parallaxMessages` subscription, topic
+  `navigation.navigation_service.trip_info` (protobuf; empty when not navigating, destination
+  names and place ids appear as plain strings), plus `…trip_progress` every 5 s while
+  navigating. The cloud answers success for anything, so this is the only real confirmation.
+- **Send one place (starts navigating):** `ParseAndShareLocationToVehicle(str, vehicleId, requiresWakeup)` where `str`
   is a link like `https://telenav.id/entity?geo_coordinates=LAT,LNG&entity_id=<Google place
   id>&name=…&nav_coordinates=LAT,LNG&address=…&source_type=telenav`. Success is
-  `publishResponse.result == 0`.
-- **Send a trip:** plan with `PlanTrip2` (waypoints: the vehicle's location first, then the stops;
+  `publishResponse.result == 0`. Rivian returns INTERNAL_SERVER_ERROR for a telenav link without
+  `entity_id`; Google Maps links and `geo:` URIs are accepted too. `requiresWakeup` wakes the
+  vehicle; it shows the route ~30 s later. A share arriving while the vehicle goes to sleep is
+  lost (no error), so wait for `trip_info` and re-send.
+- **Send a trip (replaces the active route):** plan with `PlanTrip2` (waypoints: the vehicle's location first, then the stops;
   start SoC, arrival SoC, charging networks), then `SendUpdatedTrip`, a `sendParallaxPayload` with
   `meta { model: "c2v_navigation.trip_copilot.updated_trip", isVehicleModelOp: false,
   requiresWakeup: true }` and this unsigned payload:
@@ -192,8 +199,11 @@ settings  { 1: arrival SoC (float), 2: arrival SoC (float), 3: "switchExcludeMot
 
   Destination `i` is `plan.waypoints[i + 1]` (index 0 is the start). Rebuilding a captured
   trip from its `PlanTrip2` response this way matches the app's bytes exactly.
+  **The vehicle ignores an updated trip when it isn't navigating**, so share the first stop
+  first (as the app does), wait for `trip_info`, then send the trip. The vehicle's route then
+  lists the user's stops; the planner's charging stops don't appear by name in `trip_info`.
 - **End the trip:** the same message with `trip { 1: { 1: "end_trip_<unix ms>" }, 2: empty,
-  3: { 1: user id } }`.
+  3: { 1: user id } }`. Works whether the vehicle is awake or asleep; `trip_info` becomes empty.
 
 ## Things that are NOT needed
 

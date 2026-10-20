@@ -397,11 +397,26 @@ async def cmd_navigate(args):
             place = {"name": args.place, "url": args.place}
         else:
             [place] = await places(api, user, vehicle, [args.place])
-        ok = await trip.share_location(api, vehicle["id"], place)
-        print(f"{place['name']}: {'sent to the vehicle' if ok else 'rejected'}")
+        async with trip.TripWatcher(api, vehicle["id"]) as watch:
+            ok = await start_navigation(api, vehicle, place, watch)
+        print(f"{place['name']}: {'the vehicle is navigating there' if ok else 'not confirmed by the vehicle'}")
         return ok
     finally:
         await api.close()
+
+
+async def start_navigation(api, vehicle, place, watch):
+    """Share one place with the vehicle and wait until it reports navigating to it. A share that
+    reaches the vehicle while it is going to sleep gets lost (the app needs retries too)."""
+    before = watch.route
+    for attempt in range(1, 4):
+        if not await trip.share_location(api, vehicle["id"], place):
+            die(f"Rivian refused to send {place['name']!r}")
+        print(f"sent {place['name']!r}{f' (try {attempt})' if attempt > 1 else ''}; "
+              "waiting for the vehicle to start navigating (wakes it if asleep)…")
+        if await watch.wait(lambda route: route and route != before, 60):
+            return True
+    return False
 
 
 def trip_summary(plan, stops):
@@ -428,8 +443,14 @@ async def cmd_trip(args):
         user = await current_user(api)
         vehicle = pick_vehicle(user, args.vehicle)
         if args.end:
-            ok = await trip.send_trip(api, vehicle["id"], trip.end_trip_message(user["id"]))
-            print("end trip: " + ("sent to the vehicle" if ok else "rejected"))
+            async with trip.TripWatcher(api, vehicle["id"]) as watch:
+                if watch.route == b"":
+                    print("the vehicle isn't navigating")
+                    return True
+                if not await trip.send_trip(api, vehicle["id"], trip.end_trip_message(user["id"])):
+                    die("Rivian refused to end the trip")
+                ok = await watch.wait(lambda route: route == b"", 90)
+            print("trip ended" if ok else "end trip: not confirmed by the vehicle")
             return ok
         stops = await places(api, user, vehicle, args.places)
         lat, lng, soc = await trip.vehicle_position(api, vehicle["id"])
@@ -442,8 +463,18 @@ async def cmd_trip(args):
         trip_summary(plans[0], stops)
         if args.dry_run:
             return True
-        ok = await trip.send_trip(api, vehicle["id"], trip.trip_message(plans[0], stops, user["id"], args.arrive))
-        print("trip: " + ("sent to the vehicle" if ok else "rejected"))
+        # The vehicle only takes a trip as an update to the route it is navigating, so start
+        # navigating to the first stop (like the app's "send to vehicle"), then replace the route.
+        async with trip.TripWatcher(api, vehicle["id"]) as watch:
+            if not await start_navigation(api, vehicle, stops[0], watch):
+                die("the vehicle didn't start navigating — is it online? try again in a minute")
+            started = watch.route
+            message = trip.trip_message(plans[0], stops, user["id"], args.arrive)
+            if not await trip.send_trip(api, vehicle["id"], message):
+                die("Rivian refused the trip")
+            ok = await watch.wait(lambda route: route and route != started, 60)
+        print("the vehicle is navigating this trip" if ok else
+              f"trip not confirmed by the vehicle (it is navigating to {stops[0]['name']!r})")
         return ok
     finally:
         await api.close()

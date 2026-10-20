@@ -1,11 +1,17 @@
 """Navigation: send a destination or a planned trip to the vehicle, like the Rivian app does.
 
-Two ways, both seen in the app's traffic (no paired key needed, only a signed-in session):
-- ParseAndShareLocationToVehicle: "send to vehicle" for one place (a telenav.id link).
-- PlanTrip2 then SendUpdatedTrip: a full trip with legs and charging stops, sent as a
-  SendParallaxPayload with model c2v_navigation.trip_copilot.updated_trip (unsigned). An
-  "end_trip_<ms>" trip with no legs ends navigation on the vehicle.
+As seen in the app's traffic and confirmed on a vehicle (no paired key needed, only a
+signed-in session):
+- ParseAndShareLocationToVehicle ("send to vehicle", a telenav.id link) starts navigating to
+  one place, waking the vehicle if needed.
+- SendUpdatedTrip (PlanTrip2's plan as a SendParallaxPayload with model
+  c2v_navigation.trip_copilot.updated_trip, unsigned) replaces the route the vehicle is already
+  navigating, e.g. with more stops and charging stops. With no route active it is ignored.
+- An "end_trip_<ms>" trip with no legs ends navigation.
+The cloud reports success either way; what the vehicle did shows in its
+navigation.navigation_service.trip_info messages (TripWatcher).
 """
+import asyncio
 import base64
 import struct
 import time
@@ -15,6 +21,7 @@ from urllib.parse import urlencode
 from protocol import f_len, f_var
 
 TRIP_MODEL = "c2v_navigation.trip_copilot.updated_trip"
+TRIP_INFO = "navigation.navigation_service.trip_info"  # the vehicle's active route; empty when not navigating
 # What the app sent: charging networks it plans with, and the matching filter switches.
 NETWORKS = ("10001", "10025", "10027", "10030", "10031", "10056", "10050")
 SWITCHES = ("switchExcludeMotorway:false", "switchExcludeFerry:false", "switchExcludeToll:false")
@@ -162,3 +169,39 @@ async def send_trip(api, vehicle_id, trip):
                      "isVehicleModelOp: false requiresWakeup: true }) { success } }",
                      {"vehicleId": vehicle_id, "payload": payload(trip)})
     return bool((data.get("sendParallaxPayload") or {}).get("success"))
+
+
+class TripWatcher:
+    """The vehicle's active route as it reports it (TRIP_INFO, protobuf bytes; empty when not
+    navigating, destination names appear in it as plain strings)."""
+
+    def __init__(self, api, vehicle_id):
+        self.api, self.vehicle_id = api, vehicle_id
+        self.route, self._changed, self._stop = None, asyncio.Event(), None
+
+    async def __aenter__(self):
+        self._stop = await self.api.subscribe_for_parallax_messages(self.vehicle_id, self._on_message, [TRIP_INFO])
+        await self.wait(lambda route: True, 10)  # the subscription starts with the current route
+        return self
+
+    async def __aexit__(self, *exc):
+        if self._stop:
+            await self._stop()
+
+    def _on_message(self, message):
+        data = ((message.get("payload") or {}).get("data") or {}).get("parallaxMessages") or {}
+        if data.get("rvm") == TRIP_INFO:
+            self.route = base64.b64decode(data.get("payload") or "")
+            self._changed.set()
+
+    async def wait(self, done, timeout):
+        """Wait until done(route) holds for the latest route; False on timeout."""
+        deadline = time.monotonic() + timeout
+        while True:
+            self._changed.clear()
+            if self.route is not None and done(self.route):
+                return True
+            try:
+                await asyncio.wait_for(self._changed.wait(), deadline - time.monotonic())
+            except TimeoutError:
+                return False

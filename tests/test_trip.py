@@ -1,9 +1,10 @@
 """Offline tests of the navigation messages; no account or vehicle access."""
+import asyncio
 import base64
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -67,6 +68,28 @@ class TripMessages(unittest.TestCase):
         self.assertEqual(trip.share_url(STOPS[1]),  # no place id: Rivian refuses telenav links without one
                          "https://www.google.com/maps/search/?api=1&query=39.0%2C-94.5")
         self.assertEqual(trip.share_url({"url": "geo:1,2"}), "geo:1,2")
+
+
+class Watcher(unittest.IsolatedAsyncioTestCase):
+    async def test_waits_for_the_vehicles_route(self):
+        api = Mock()
+        callbacks = []
+
+        async def subscribe(vehicle_id, callback, rvms):
+            callbacks.append(callback)
+            callback(message(b""))  # the current route arrives first: not navigating
+            return AsyncMock()
+        api.subscribe_for_parallax_messages = subscribe
+
+        def message(route, rvm=trip.TRIP_INFO):
+            return {"payload": {"data": {"parallaxMessages": {"rvm": rvm,
+                                                              "payload": base64.b64encode(route).decode()}}}}
+        async with trip.TripWatcher(api, "v") as watch:
+            self.assertEqual(watch.route, b"")
+            asyncio.get_running_loop().call_later(0.01, callbacks[0], message(b"other", rvm="x.y"))
+            asyncio.get_running_loop().call_later(0.02, callbacks[0], message(b"Golf route"))
+            self.assertTrue(await watch.wait(lambda route: b"Golf" in route, 1))
+            self.assertFalse(await watch.wait(lambda route: route == b"", 0.05))
 
 
 class Places(unittest.TestCase):
