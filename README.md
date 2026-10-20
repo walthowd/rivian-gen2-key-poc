@@ -126,8 +126,9 @@ python rivian_key.py command precondition_temp 21
 python rivian_key.py command cabin_hvac_left_seat_heat 3
 ```
 
-Seen working: `lock`, `unlock`, `windows_open`, `windows_close` (and `wake` is accepted). The
-rest come from rivian-python-client and haven't been tried with this POC yet; please report. If the vehicle is asleep, send `wake` first.
+Seen working on a Gen 2 R1S: `lock`, `unlock`, `windows_open`, `windows_close`, `honk`, `flash`
+(and `wake` is accepted). The rest come from rivian-python-client and haven't been tried with
+this POC yet; please report. If the vehicle is asleep, send `wake` first.
 
 ### Navigation
 
@@ -164,6 +165,35 @@ the app or on the vehicle), inserts the new places (next by default, `--at end` 
 and sends the result. Each command waits
 until the vehicle itself reports the change, usually within 30 seconds; `navigate` and `trip`
 re-send if the vehicle missed it (it sometimes does while falling asleep).
+
+### Gear Guard and alarm
+
+```bash
+python rivian_key.py gearguard on     # / off: Gear Guard motion cameras (video monitoring)
+python rivian_key.py alarm on         # / off: the car alarm (panic). Loud!
+```
+
+Each waits until the vehicle reports the new state (it wakes the vehicle if needed).
+
+### Live cameras (Gear Guard)
+
+Watch a Gear Guard camera live in your browser, started and signed by your own key:
+
+```bash
+python rivian_key.py stream            # front camera (default)
+python rivian_key.py stream rear       # front | rear | left | right | interior | bed
+python rivian_key.py stream --no-open  # print the local URL instead of opening a browser
+```
+
+It wakes the vehicle, turns on video monitoring, starts the chosen camera, and opens a local page
+that plays the stream over WebRTC. Works with a plain paired key; no digital key needed. Needs the
+vehicle in Park, Connect+, and precise location sharing enabled.
+
+Limits (enforced by the vehicle):
+
+- 1 hour of streaming per day
+- about 3 minutes per session
+- one session at a time
 
 ### Halloween (Ghostbusters costume)
 
