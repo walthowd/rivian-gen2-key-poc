@@ -167,6 +167,38 @@ Gen 2 honks and flashes with the cloud commands `ACTIVATE_EXTERNAL_SOUND` and
 `FLASH_EXTERNAL_LIGHTS` (signed like any `sendVehicleCommand`); the combined
 `HONK_AND_FLASH_LIGHTS` is refused with `CONFLICT/VEHICLE_COMMAND_ERROR`.
 
+### Gear Guard live camera streaming (Kinesis WebRTC)
+
+`security.video_monitoring.start_live_streaming` (signed, params field 4 = `{1: camera, 2: device
+id}`) makes the vehicle a KVS WebRTC master for one camera; camera values (RivianMotionCamera): 1
+front, 2 bed, 3 left, 4 right, 5 rear, 6 interior. The cloud returns the viewer config (presigned
+signaling endpoint ~1h, channel ARN, ICE servers) on the GraphQL subscription
+`GearGuardLiveConfigSubscription($vehicleId, $commandId){ gearGuardLiveConfig { endpoint channelArn
+role iceServers { url username credential ttl } } }`.
+
+- **Correlation:** `commandId` must equal the start op's parallax request id (fields 3 and 16),
+  formatted as 32 lowercase hex chars (no dashes). This, not the device id, is what the cloud keys
+  the config delivery on. Open the subscription, then send start with the same request id.
+- **Device id** (field 4.2): just a label for the viewer device. Testing showed the vehicle accepts
+  any non-empty string here (a random UUID, our vasPhoneId, even a plain word) once in-vehicle
+  consent is granted; it does **not** have to be a registered digital key. The official app happens
+  to send its CCC key's `identityId`, but the vehicle doesn't require it, so a plain phone key
+  streams fine. (Earlier "only a cccKeyId works" results were an artifact of the one-session-at-a-
+  time limit below, not the id value.)
+- **Viewer signaling:** join the presigned endpoint as viewer; send `{senderClientId:
+  "ConsumerViewer", action: "SDP_OFFER", recipientClientId: "", messagePayload: base64(offer)}`,
+  and ICE as `{senderClientId: "ConsumerViewer", action: "ICE_CANDIDATE", messagePayload:
+  base64(candidate)}`. The `senderClientId` is required or the master won't answer.
+- **One session at a time:** the vehicle serves a single live session; a start is refused while a
+  previous one (e.g. the app's live view) is still active or clearing. This is what made arbitrary
+  device ids look like they "sometimes" worked.
+- **Limits (vehicle-enforced, not in the app):** a per-session cap (teardown reason SESSION_LIMIT,
+  ~3 min observed) and a daily cap of **1 hour/day** (DAILY_LIMIT; the
+  `gearguard_streaming.privacy.*_daily_limit` topic reports HIT/NOT_HIT + a next-reset Unix-seconds
+  timestamp). Other teardown reasons: not in Park, feature disabled, in service/transport, OTA in
+  progress, consent not given. Account prerequisites: Connect+ subscription and precise location
+  sharing opted in.
+
 Halloween operations (prefix `holiday_celebration.car_costume.`), params as protobuf fields:
 
 | Operation | Params | Effect |

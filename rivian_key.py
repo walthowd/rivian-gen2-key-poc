@@ -11,6 +11,7 @@
   halloween ACTION      Ghostbusters costume: on/off, show, sound, music, volume, lights
   gearguard on|off      Gear Guard motion cameras (video monitoring)
   alarm on|off          car alarm (panic) — loud!
+  stream                watch the Gear Guard live cameras in your browser
   navigate PLACE        send one destination to the vehicle's navigation
   trip PLACE [PLACE…]   plan a trip (with charging stops) and send it to the vehicle;
                         --add adds stops to the active trip, --end stops it
@@ -42,6 +43,7 @@ from rivian.utils import generate_key_pair
 
 import halloween
 import trip
+import video
 from protocol import parse_fields
 from common import KEYS_DIR, ROOT, SESSION_FILE, derive_secret, die, key_names, key_path, load_json, load_key, load_session, log, save_json
 
@@ -574,6 +576,69 @@ async def cmd_security(args):
         await api.close()
 
 
+async def cmd_stream(args):
+    """Start a Gear Guard live session with our own key and open the camera in a local browser."""
+    # Config mode: just play a stream config captured elsewhere (no account/vehicle calls).
+    if getattr(args, "config", None):
+        import json
+        with open(args.config) as handle:
+            blob = json.load(handle)
+        config = blob.get("gearGuardLiveConfig") or (((blob.get("payload") or {}).get("data") or {})
+                                                      .get("gearGuardLiveConfig")) or blob
+        if not config.get("endpoint"):
+            die("that file has no stream endpoint (expected a gearGuardLiveConfig with an endpoint)")
+        print(f"serving captured stream (role {config.get('role')}); opening the viewer.")
+        await video.serve(config, open_browser=not args.no_open)
+        return True
+
+    key = load_key(args.key)
+    secret = derive_secret(key["private_key"], key["vehicle_public_key"])
+    log.secret(secret.hex(), "hmac_key")
+    vehicle_id = key["vehicle_id"]
+    camera = video.CAMERAS[args.camera]
+    device_id = video.device_id_for(key, getattr(args, "device_id", None))
+    log.secret(device_id, "gearguard_device_id")
+    api = await connect()
+    config = None
+    try:
+        # 1. Wake the vehicle and make sure video monitoring is on (the app does this first).
+        async with trip.TripWatcher(api, vehicle_id, video.STATE_TOPIC) as monitor:
+            if not (monitor.route is not None and video.video_monitoring_on(monitor.route)):
+                if not await halloween.send(api, key, secret, video.ENABLE_OP, b""):
+                    die("Rivian refused enable_video_monitoring")
+                print("waking the vehicle and turning on video monitoring…")
+                if not await monitor.wait(video.video_monitoring_on, 90):
+                    die("the vehicle didn't confirm video monitoring on (is the key paired?)")
+            # 2. Subscribe (commandId = the start's request id) and 3. start. The vehicle serves one
+            # session at a time, so a start can be refused while an earlier one (e.g. the app's live
+            # view) is still clearing; retry a couple of times before giving up.
+            for attempt in range(3):
+                request_id, command_id = video.new_request()
+                log.debug(f"stream camera={args.camera}({camera}) attempt {attempt + 1} commandId={command_id}")
+                print(f"starting the {args.camera} camera stream…"
+                      + (f" (retry {attempt})" if attempt else ""))
+                async with video.ConfigWatcher(api, vehicle_id, command_id) as watcher:
+                    if not await video.send_start(api, key, secret, device_id, camera, request_id):
+                        die("Rivian refused start_live_streaming")
+                    config = await watcher.wait(40)
+                if config:
+                    break
+                if attempt < 2:
+                    print("no stream yet (the vehicle may be finishing another session); waiting…")
+                    await asyncio.sleep(20)
+        if not config:
+            die("no stream config arrived — the vehicle streams one session at a time; close any "
+                "live view in the Rivian app, wait a minute, and try again (also needs Park, "
+                "Gear Guard on, Connect+, and precise location sharing enabled).")
+        log.debug(f"stream config: endpoint host={config['endpoint'].split('/')[2]} "
+                  f"role={config.get('role')} ice_servers={len(config.get('iceServers') or [])}")
+        print(f"got the stream (role {config.get('role')}); opening the viewer in your browser.")
+    finally:
+        await api.close()
+    # 4. Serve the viewer. Kept separate from the API connection so Ctrl-C only stops the viewer.
+    await video.serve(config, open_browser=not args.no_open)
+
+
 async def cmd_halloween(args):
     try:
         op, params = halloween.operation(args.action, args.value, args.motion)
@@ -797,6 +862,13 @@ def main(argv=None):
         s = sub.add_parser(name, help=text)
         s.add_argument("action", choices=["on", "off"])
         s.add_argument("--key", help="key name (only if you have several)")
+    s = sub.add_parser("stream", help="start a Gear Guard camera and watch it in your browser")
+    s.add_argument("camera", nargs="?", default="front", choices=list(video.CAMERAS),
+                   help="which camera to stream (default: front)")
+    s.add_argument("--key", help="key name (only if you have several)")
+    s.add_argument("--no-open", action="store_true", help="don't open a browser; just print the URL")
+    s.add_argument("--device-id", help=argparse.SUPPRESS)  # Gear Guard streaming device id override
+    s.add_argument("--config", help=argparse.SUPPRESS)  # serve a stream config captured elsewhere
     s = sub.add_parser("halloween", help="Ghostbusters car costume: " + halloween.USAGE)
     s.add_argument("action", choices=["on", "off", "show", "sound", "music", "volume", "lights"])
     s.add_argument("value", nargs="?", help="show name, sound 1-8, track/off, volume, on/off")
@@ -811,7 +883,7 @@ def main(argv=None):
     handler = {"setup": cmd_setup, "login": cmd_login, "enroll": cmd_enroll, "import-ha": cmd_import_ha,
                "status": cmd_status, "command": cmd_command, "halloween": cmd_halloween,
                "remove": cmd_remove, "navigate": cmd_navigate, "trip": cmd_trip,
-               "gearguard": cmd_security, "alarm": cmd_security}[args.cmd]
+               "gearguard": cmd_security, "alarm": cmd_security, "stream": cmd_stream}[args.cmd]
     try:
         result = asyncio.run(handler(args))
     except (KeyboardInterrupt, EOFError):

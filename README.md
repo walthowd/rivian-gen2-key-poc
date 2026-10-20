@@ -175,6 +175,26 @@ python rivian_key.py alarm on         # / off: the car alarm (panic). Loud!
 
 Each waits until the vehicle reports the new state (it wakes the vehicle if needed).
 
+### Live cameras (Gear Guard)
+
+Watch a Gear Guard camera live in your browser, started and signed by your own key:
+
+```bash
+python rivian_key.py stream            # front camera (default)
+python rivian_key.py stream rear       # front | rear | left | right | interior | bed
+python rivian_key.py stream --no-open  # print the local URL instead of opening a browser
+```
+
+It wakes the vehicle, turns on video monitoring, starts the chosen camera, and opens a local page
+that plays the stream over WebRTC. Works with a plain paired key; no digital key needed. Needs the
+vehicle in Park, Connect+, and precise location sharing enabled.
+
+Limits (enforced by the vehicle):
+
+- 1 hour of streaming per day
+- about 3 minutes per session
+- one session at a time
+
 ### Halloween (Ghostbusters costume)
 
 When the vehicle offers the seasonal Ghostbusters mode:
