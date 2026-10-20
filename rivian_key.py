@@ -372,12 +372,16 @@ def resolve_place(text, saved):
     if match := PLACE_RE.fullmatch(text):
         lat, lng, name = match.groups()
         return {"name": name or f"{lat},{lng}", "latitude": float(lat), "longitude": float(lng)}
+    if not text.strip():
+        die("empty place name")
     for place in saved:
-        kind = (place.get("locationType") or "").removeprefix("FAVORITE_").lower()  # FAVORITE_HOME: "home"
+        kind = {"FAVORITE_HOME": "home", "FAVORITE_WORK": "work"}.get(place.get("locationType"))
         if text.lower() in (kind, (place.get("userGivenName") or "").lower(), (place.get("name") or "").lower()):
-            coordinate = place["coordinate"]
-            return {"name": place.get("userGivenName") or (text.title() if text.lower() == kind else place["name"]),
-                    "address": place.get("address"), "place_id": place.get("id"),  # a Google place id
+            name = place.get("userGivenName") or (text.title() if text.lower() == kind else place["name"])
+            coordinate = place.get("coordinate") or {}
+            if coordinate.get("latitude") is None or coordinate.get("longitude") is None:
+                die(f"{name!r} has no coordinates in your saved locations")
+            return {"name": name, "address": place.get("address"), "place_id": place.get("id"),  # a Google place id
                     "latitude": coordinate["latitude"], "longitude": coordinate["longitude"]}
     names = ", ".join(dict.fromkeys(repr(p.get("userGivenName") or p.get("name")) for p in saved)) or "none"
     die(f"{text!r}: not LAT,LNG[=Name] or a saved location (saved: {names})")
@@ -421,19 +425,34 @@ async def start_navigation(api, vehicle, place, watch):
 
 
 def trip_summary(plan, stops):
-    summary, user_stops = plan["summary"], iter(stops)
-    print(f"{summary['totalDriveDistanceMeters'] / 1609.344:.0f} mi, "
-          f"{summary['totalTripDurationSeconds'] / 3600:.1f} h including "
-          f"{summary['totalChargeDurationSeconds'] / 60:.0f} min charging, "
-          f"arriving with {summary['arrivalSOCPercent']:.0f}%"
-          f"{'' if summary['destinationReachable'] else ' (DESTINATION NOT REACHABLE)'}")
-    for waypoint in plan["waypoints"][1:]:
+    """Rivian's plan, as a preview (the vehicle plans its own route and charging)."""
+    def num(value, scale=1, fmt=".0f"):
+        return "?" if value is None else format(value / scale, fmt)
+    summary, user_stops = plan.get("summary") or {}, iter(stops)
+    print(f"plan: {num(summary.get('totalDriveDistanceMeters'), 1609.344)} mi, "
+          f"{num(summary.get('totalTripDurationSeconds'), 3600, '.1f')} h including "
+          f"{num(summary.get('totalChargeDurationSeconds'), 60)} min charging, "
+          f"arriving with {num(summary.get('arrivalSOCPercent'))}%"
+          f"{' (DESTINATION NOT REACHABLE)' if summary.get('destinationReachable') is False else ''}")
+    for waypoint in plan.get("waypoints", [])[1:]:
         if waypoint.get("isSystemAdded") and waypoint.get("charger"):
             charger = waypoint["charger"]
-            print(f"  charge: {charger['name']} ({charger['chargeDurationSeconds'] / 60:.0f} min, "
-                  f"arrive {waypoint['arrivalSOCPercent']:.0f}%)")
+            print(f"  charge: {charger.get('name')} ({num(charger.get('chargeDurationSeconds'), 60)} min, "
+                  f"arrive {num(waypoint.get('arrivalSOCPercent'))}%)")
         else:
-            print(f"  stop:   {next(user_stops)['name']} (arrive {waypoint['arrivalSOCPercent']:.0f}%)")
+            print(f"  stop:   {next(user_stops, {'name': '?'})['name']} "
+                  f"(arrive {num(waypoint.get('arrivalSOCPercent'))}%)")
+
+
+def insert_position(at, count):
+    """Where --add puts new stops among `count` current ones: "next", "end" or stop number N."""
+    if at == "next":
+        return 0
+    if at == "end":
+        return count
+    if at.isdigit() and 1 <= int(at) <= count + 1:
+        return int(at) - 1
+    die(f"--at: next, end or a stop number 1-{count + 1}")
 
 
 async def cmd_trip(args):
@@ -441,6 +460,10 @@ async def cmd_trip(args):
         die("give one or more places (LAT,LNG[=Name] or a saved location), or --end")
     if args.end and args.add:
         die("--add and --end don't go together")
+    if args.at and not args.add:
+        die("--at only goes with --add")
+    if args.at and not (args.at in ("next", "end") or args.at.isdigit()):
+        die("--at: next, end or a stop number")
     api = await connect()
     try:
         user = await current_user(api)
@@ -459,10 +482,13 @@ async def cmd_trip(args):
         if args.add:
             async with trip.TripWatcher(api, vehicle["id"]) as watch:
                 current = trip.active_stops(watch.route)
+            if watch.route is None:
+                die("no trip status from the vehicle — is it online? try again in a minute")
             if not current:
                 die("the vehicle isn't navigating — start a trip first (or leave out --add)")
-            print(f"adding {', '.join(s['name'] for s in stops)} before: {', '.join(s['name'] for s in current)}")
-            stops += current
+            at = insert_position(args.at or "next", len(current))
+            stops = current[:at] + stops + current[at:]
+            print("new stops: " + " → ".join(s["name"] for s in stops))
         lat, lng, soc = await trip.vehicle_position(api, vehicle["id"])
         if lat is None or soc is None:
             die("the vehicle hasn't reported its location and charge — wake it and try again")
@@ -476,6 +502,14 @@ async def cmd_trip(args):
         # Like the app's trip planner: send the stops, the vehicle plans route and charging itself
         # (it may pick other chargers than the preview above).
         async with trip.TripWatcher(api, vehicle["id"]) as watch:
+            ended = bool(watch.route)
+            if watch.route:
+                # The vehicle merges a trip into the active one (new stops first, then the others), so
+                # end that first and send the complete list: the order is then exactly ours.
+                print("ending the vehicle's current trip first…")
+                if not await trip.send_trip(api, vehicle["id"], trip.end_trip_message(user["id"])) or \
+                        not await watch.wait(lambda route: route == b"", 90):
+                    die("couldn't end the vehicle's current trip; try `trip --end`, then this again")
             before, ok = watch.route, False
             for attempt in range(1, 4):  # a trip arriving while the vehicle falls asleep is lost
                 if not await trip.send_trip_to_vehicle(api, vehicle["id"], {"latitude": lat, "longitude": lng},
@@ -487,7 +521,8 @@ async def cmd_trip(args):
                     await watch.wait(lambda route: False, 15)  # it publishes the charging plan a few seconds later
                     break
         if not ok:
-            print("trip not confirmed by the vehicle")
+            print("trip not confirmed by the vehicle" +
+                  (" (its previous trip was ended); run this again" if ended else ""))
             return False
         print("the vehicle is navigating: " + " → ".join(s["name"] for s in trip.active_stops(watch.route)))
         for name, minutes in trip.active_chargers(watch.route):
@@ -709,9 +744,10 @@ def main(argv=None):
     s.add_argument("--vehicle", help="vehicle name (only if you have several)")
     s = sub.add_parser("trip", help="plan a trip with charging stops and send it to the vehicle")
     s.add_argument("places", nargs="*", help="stops in order: LAT,LNG[=Name] or saved location names")
-    s.add_argument("--arrive", type=float, default=20, help="minimum charge %% at each stop (default 20)")
+    s.add_argument("--arrive", type=float, default=20, help="minimum charge %% at the final stop (default 20)")
     s.add_argument("--dry-run", action="store_true", help="plan and show the trip, but don't send it")
-    s.add_argument("--add", action="store_true", help="add the places as next stops to the trip the vehicle is navigating")
+    s.add_argument("--add", action="store_true", help="add the places to the trip the vehicle is navigating")
+    s.add_argument("--at", help="with --add: next (default), end, or the stop number the new place becomes")
     s.add_argument("--end", action="store_true", help="end the trip running on the vehicle")
     s.add_argument("--vehicle", help="vehicle name (only if you have several)")
     s = sub.add_parser("halloween", help="Ghostbusters car costume: " + halloween.USAGE)
@@ -743,7 +779,7 @@ def main(argv=None):
     except Exception as error:  # noqa: BLE001 — rivian-python-client raises many types
         log.exception(f"error: {error_text(error)}")
     else:
-        return result if args.cmd == "setup" else 0
+        return result if args.cmd == "setup" else (1 if result is False else 0)
     if args.cmd == "setup":
         setup_help()  # already names the debug log
         return 1

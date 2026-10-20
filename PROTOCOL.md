@@ -190,6 +190,9 @@ Seen in the app's traffic and confirmed on a Gen 2 R1S; nothing is signed with t
   its `trip_info` then holds destinations at `3.3.1` and charging stops at `3.3.2 = { 1: charger
   id, 2: name, 3: { 1: lat, 2: lng }, 4: charge seconds, 6: arrival SoC, … }`, plus the starting
   SoC at top-level field 5. This is the app's trip planner "Go".
+  **If a trip is already active, the vehicle merges:** the new stops go first and existing stops
+  not in the new list are kept after them. To replace a trip, end it first (the app's planner
+  starts from no active trip); to add a stop, this merge is all you need.
 - **Replace the active route with a pre-planned one (older app path):** plan with `PlanTrip2` (waypoints: the vehicle's location first, then the stops;
   start SoC, arrival SoC, charging networks), then `SendUpdatedTrip`, a `sendParallaxPayload` with
   `meta { model: "c2v_navigation.trip_copilot.updated_trip", isVehicleModelOp: false,
@@ -212,9 +215,10 @@ settings  { 1: arrival SoC (float), 2: arrival SoC (float), 3: "switchExcludeMot
   first (as the app did), wait for `trip_info`, then send the trip. The vehicle then navigates
   the user's stops but drops the planned charging stops and has no charge estimates (the app
   shows arrival range "0% · --"); `sendTripToVehicle` doesn't have that problem.
-- **Add a stop to the active route:** read its destinations from `trip_info` (field 3, each
-  `3.3.1 = { 1: { 1: lat, 2: lng } (doubles), 4: name, 5: place id }`) and send them, with the new
-  stop, via `sendTripToVehicle`.
+- **Add a stop to the active route:** sending just the new stop via `sendTripToVehicle` puts it
+  first (the merge above). `trip --add` instead reads the active destinations from `trip_info`
+  (field 3, each `3.3.1 = { 1: { 1: lat, 2: lng } (doubles), 4: name, 5: place id }`), inserts the
+  new stop where asked, ends the trip and sends the complete list, so the order is exactly ours.
 - **End the trip:** the same message with `trip { 1: { 1: "end_trip_<unix ms>" }, 2: empty,
   3: { 1: user id } }`. Works whether the vehicle is awake or asleep; `trip_info` becomes empty.
 

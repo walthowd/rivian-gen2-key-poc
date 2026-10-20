@@ -8,8 +8,9 @@ signed-in session):
   and charging stops itself, with arrival charge estimates. Used by `trip`.
 - SendUpdatedTrip (PlanTrip2's plan as a SendParallaxPayload with model
   c2v_navigation.trip_copilot.updated_trip, unsigned) replaces the route the vehicle is already
-  navigating, e.g. with more stops and charging stops. With no route active it is ignored.
-- An "end_trip_<ms>" trip with no legs ends navigation.
+  navigating (ignored when none is), but the vehicle then drops the charging stops. The app's
+  older path; trip_message is kept as its documented, byte-verified format. Used here only for:
+- an "end_trip_<ms>" trip with no legs, which ends navigation.
 The cloud reports success either way; what the vehicle did shows in its
 navigation.navigation_service.trip_info messages (TripWatcher).
 """
@@ -69,7 +70,7 @@ def share_url(stop):
 
 def active_stops(route):
     """The named destinations of the route the vehicle reports (TRIP_INFO), in order: each leg
-    (field 3) has its destination at 3.1 = {1: {1: lat, 2: lng}, 4: name, 5: place id}.
+    (field 3) has its destinations at 3.3.1 = {1: {1: lat, 2: lng}, 4: name, 5: place id}.
     Charging stops have no name there; they're re-planned anyway."""
     stops = []
     for leg in parse_fields(route).get(3, []) if route else []:
@@ -242,6 +243,8 @@ class TripWatcher:
 
     async def __aenter__(self):
         self._stop = await self.api.subscribe_for_parallax_messages(self.vehicle_id, self._on_message, [TRIP_INFO])
+        if self._stop is None:
+            raise RuntimeError("couldn't subscribe to the vehicle's trip status (see the debug log)")
         await self.wait(lambda route: True, 10)  # the subscription starts with the current route
         return self
 

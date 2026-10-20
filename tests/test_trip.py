@@ -130,6 +130,27 @@ class Watcher(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await watch.wait(lambda route: route == b"", 0.05))
 
 
+class Summary(unittest.TestCase):
+    def test_missing_numbers_and_extra_stops_dont_crash(self):
+        plan = {"summary": {"totalDriveDistanceMeters": None, "destinationReachable": False},
+                "waypoints": [{}, {"arrivalSOCPercent": None}, {"isSystemAdded": True, "charger": {"name": "C"}},
+                              {"arrivalSOCPercent": 5}]}
+        with patch("builtins.print") as printed:
+            rivian_key.trip_summary(plan, [STOPS[0]])
+        lines = [c.args[0] for c in printed.call_args_list]
+        self.assertIn("? mi", lines[0])
+        self.assertIn("NOT REACHABLE", lines[0])
+        self.assertEqual(lines[-1], "  stop:   ? (arrive 5%)")
+
+
+class InsertPosition(unittest.TestCase):
+    def test_positions(self):
+        self.assertEqual([rivian_key.insert_position(at, 2) for at in ("next", "end", "1", "2", "3")], [0, 2, 0, 1, 2])
+        for bad in ("0", "4", "last"):
+            with patch.object(rivian_key, "die", side_effect=SystemExit), self.assertRaises(SystemExit):
+                rivian_key.insert_position(bad, 2)
+
+
 class Places(unittest.TestCase):
     SAVED = [{"name": "123 Main St", "userGivenName": "Home", "address": "123 Main St",
               "coordinate": {"latitude": 1.5, "longitude": 2.5}}]
@@ -152,6 +173,16 @@ class Places(unittest.TestCase):
     def test_saved_location_by_name(self):
         place = rivian_key.resolve_place("home", self.SAVED)
         self.assertEqual((place["name"], place["latitude"]), ("Home", 1.5))
+
+    def test_saved_location_without_coordinates(self):
+        with patch.object(rivian_key, "die", side_effect=SystemExit) as die, self.assertRaises(SystemExit):
+            rivian_key.resolve_place("Gym", [{"name": "Gym", "coordinate": None}])
+        self.assertIn("no coordinates", die.call_args.args[0])
+
+    def test_only_home_and_work_match_by_type(self):
+        saved = [{"name": "5 Pine St", "locationType": "RECENT", "coordinate": {"latitude": 1.0, "longitude": 2.0}}]
+        with patch.object(rivian_key, "die", side_effect=SystemExit), self.assertRaises(SystemExit):
+            rivian_key.resolve_place("recent", saved)
 
     def test_unknown_place_lists_saved_names(self):
         with patch.object(rivian_key, "die", side_effect=SystemExit) as die, self.assertRaises(SystemExit):
