@@ -70,6 +70,27 @@ class TripMessages(unittest.TestCase):
         self.assertEqual(trip.share_url({"url": "geo:1,2"}), "geo:1,2")
 
 
+class ActiveStops(unittest.TestCase):
+    @staticmethod
+    def leg(name=None, place_id=None, lat=1.0, lng=2.0):
+        from protocol import f_len, f_var
+        destination = f_len(1, trip.f_double(1, lat) + trip.f_double(2, lng)) + f_var(3, 2)
+        destination += (f_len(4, name.encode()) if name else b"") + (f_len(5, place_id.encode()) if place_id else b"")
+        return f_len(3, f_len(1, b"\0" * 8) + f_len(3, f_len(1, destination)) + f_len(4, b"steps"))
+
+    def test_named_destinations_in_order(self):
+        from protocol import f_len
+        route = (f_len(1, b"-123") + self.leg("Golf", "ChIJgolf", 40.5, -91.5) + self.leg() +
+                 self.leg("Stadium", None, 39.0, -94.5) + f_len(4, b"settings"))
+        self.assertEqual(trip.active_stops(route), [
+            {"name": "Golf", "place_id": "ChIJgolf", "latitude": 40.5, "longitude": -91.5},
+            {"name": "Stadium", "place_id": None, "latitude": 39.0, "longitude": -94.5}])
+
+    def test_not_navigating(self):
+        self.assertEqual(trip.active_stops(b""), [])
+        self.assertEqual(trip.active_stops(None), [])
+
+
 class Watcher(unittest.IsolatedAsyncioTestCase):
     async def test_waits_for_the_vehicles_route(self):
         api = Mock()

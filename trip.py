@@ -18,7 +18,7 @@ import time
 import uuid
 from urllib.parse import urlencode
 
-from protocol import f_len, f_var
+from protocol import f_len, f_var, parse_fields
 
 TRIP_MODEL = "c2v_navigation.trip_copilot.updated_trip"
 TRIP_INFO = "navigation.navigation_service.trip_info"  # the vehicle's active route; empty when not navigating
@@ -63,6 +63,25 @@ def share_url(stop):
     query = {"geo_coordinates": coords, "entity_id": stop.get("place_id") or "", "name": stop["name"],
              "nav_coordinates": coords, "address": stop.get("address") or "", "source_type": "telenav"}
     return "https://telenav.id/entity?" + urlencode({k: v for k, v in query.items() if v})
+
+
+def active_stops(route):
+    """The named destinations of the route the vehicle reports (TRIP_INFO), in order: each leg
+    (field 3) has its destination at 3.1 = {1: {1: lat, 2: lng}, 4: name, 5: place id}.
+    Charging stops have no name there; they're re-planned anyway."""
+    stops = []
+    for leg in parse_fields(route).get(3, []) if route else []:
+        for wrapper in parse_fields(leg).get(3, []):
+            for destination in parse_fields(wrapper).get(1, []):
+                fields = parse_fields(destination)
+                if 4 not in fields or 1 not in fields:
+                    continue
+                coords = parse_fields(fields[1][0])
+                stop = {"name": fields[4][0].decode(), "place_id": fields[5][0].decode() if 5 in fields else None,
+                        "latitude": struct.unpack("<d", coords[1][0])[0], "longitude": struct.unpack("<d", coords[2][0])[0]}
+                if not stops or stops[-1]["name"] != stop["name"]:
+                    stops.append(stop)
+    return stops
 
 
 def plan_variables(vehicle_id, origin, stops, soc, target_soc):

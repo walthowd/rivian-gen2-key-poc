@@ -202,6 +202,9 @@ settings  { 1: arrival SoC (float), 2: arrival SoC (float), 3: "switchExcludeMot
   **The vehicle ignores an updated trip when it isn't navigating**, so share the first stop
   first (as the app does), wait for `trip_info`, then send the trip. The vehicle's route then
   lists the user's stops; the planner's charging stops don't appear by name in `trip_info`.
+  To add a stop to the active route, read its destinations from `trip_info` (each leg is field
+  3, its destination `3.1 = { 1: { 1: lat, 2: lng } (doubles), 4: name, 5: place id }`), plan
+  again with the new stop included and send the trip; no share needed since a route is active.
 - **End the trip:** the same message with `trip { 1: { 1: "end_trip_<unix ms>" }, 2: empty,
   3: { 1: user id } }`. Works whether the vehicle is awake or asleep; `trip_info` becomes empty.
 

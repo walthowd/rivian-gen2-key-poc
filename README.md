@@ -140,12 +140,15 @@ or (for `navigate`) a Google Maps share link:
 python rivian_key.py navigate "Spirit Hollow Golf Course"
 python rivian_key.py trip --dry-run "Spirit Hollow Golf Course" "Arrowhead Stadium"   # plan and show only
 python rivian_key.py trip "Spirit Hollow Golf Course" "Arrowhead Stadium"             # plan and send
+python rivian_key.py trip --add "40.9640,-91.5510=Coffee stop"                          # add a next stop to the active trip
 python rivian_key.py trip --end                                                       # stop navigating
 ```
 
 `trip` plans from the vehicle's current location and charge, with charging stops like the app
 (minimum arrival charge `--arrive`, default 20%). Like the app, it first sends the first stop to
-start navigating, then replaces that route with the whole trip. Each command waits until the
+start navigating, then replaces that route with the whole trip. `--add` reads the stops of the
+trip the vehicle is navigating (whether you started it here, in the app or on the vehicle), puts
+the new places first, re-plans and sends the result. Each command waits until the
 vehicle itself reports the new route (or that it stopped navigating), usually within 30 seconds,
 and re-sends if the vehicle missed it.
 

@@ -10,7 +10,8 @@
   command CMD [VALUE]   send a command signed with the key (honk, lock, ...; --list for all)
   halloween ACTION      Ghostbusters costume: on/off, show, sound, music, volume, lights
   navigate PLACE        send one destination to the vehicle's navigation
-  trip PLACE [PLACE…]   plan a trip (with charging stops) and send it to the vehicle; --end stops it
+  trip PLACE [PLACE…]   plan a trip (with charging stops) and send it to the vehicle;
+                        --add adds stops to the active trip, --end stops it
   remove                unregister the key and delete it locally
 
 With more than one key, pick it with --key NAME.
@@ -438,6 +439,8 @@ def trip_summary(plan, stops):
 async def cmd_trip(args):
     if not args.end and not args.places:
         die("give one or more places (LAT,LNG[=Name] or a saved location), or --end")
+    if args.end and args.add:
+        die("--add and --end don't go together")
     api = await connect()
     try:
         user = await current_user(api)
@@ -453,6 +456,13 @@ async def cmd_trip(args):
             print("trip ended" if ok else "end trip: not confirmed by the vehicle")
             return ok
         stops = await places(api, user, vehicle, args.places)
+        if args.add:
+            async with trip.TripWatcher(api, vehicle["id"]) as watch:
+                current = trip.active_stops(watch.route)
+            if not current:
+                die("the vehicle isn't navigating — start a trip first (or leave out --add)")
+            print(f"adding {', '.join(s['name'] for s in stops)} before: {', '.join(s['name'] for s in current)}")
+            stops += current
         lat, lng, soc = await trip.vehicle_position(api, vehicle["id"])
         if lat is None or soc is None:
             die("the vehicle hasn't reported its location and charge — wake it and try again")
@@ -466,15 +476,14 @@ async def cmd_trip(args):
         # The vehicle only takes a trip as an update to the route it is navigating, so start
         # navigating to the first stop (like the app's "send to vehicle"), then replace the route.
         async with trip.TripWatcher(api, vehicle["id"]) as watch:
-            if not await start_navigation(api, vehicle, stops[0], watch):
+            if not args.add and not await start_navigation(api, vehicle, stops[0], watch):
                 die("the vehicle didn't start navigating — is it online? try again in a minute")
             started = watch.route
             message = trip.trip_message(plans[0], stops, user["id"], args.arrive)
             if not await trip.send_trip(api, vehicle["id"], message):
                 die("Rivian refused the trip")
             ok = await watch.wait(lambda route: route and route != started, 60)
-        print("the vehicle is navigating this trip" if ok else
-              f"trip not confirmed by the vehicle (it is navigating to {stops[0]['name']!r})")
+        print("the vehicle is navigating this trip" if ok else "trip not confirmed by the vehicle")
         return ok
     finally:
         await api.close()
@@ -694,6 +703,7 @@ def main(argv=None):
     s.add_argument("places", nargs="*", help="stops in order: LAT,LNG[=Name] or saved location names")
     s.add_argument("--arrive", type=float, default=20, help="minimum charge %% at each stop (default 20)")
     s.add_argument("--dry-run", action="store_true", help="plan and show the trip, but don't send it")
+    s.add_argument("--add", action="store_true", help="add the places as next stops to the trip the vehicle is navigating")
     s.add_argument("--end", action="store_true", help="end the trip running on the vehicle")
     s.add_argument("--vehicle", help="vehicle name (only if you have several)")
     s = sub.add_parser("halloween", help="Ghostbusters car costume: " + halloween.USAGE)
