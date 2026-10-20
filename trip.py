@@ -234,17 +234,18 @@ async def send_trip(api, vehicle_id, trip):
 
 
 class TripWatcher:
-    """The vehicle's active route as it reports it (TRIP_INFO, protobuf bytes; empty when not
-    navigating, destination names appear in it as plain strings)."""
+    """The latest message the vehicle published on one parallax topic (protobuf bytes). By default
+    its active route (TRIP_INFO: empty when not navigating, destination names appear in it as
+    plain strings)."""
 
-    def __init__(self, api, vehicle_id):
-        self.api, self.vehicle_id = api, vehicle_id
+    def __init__(self, api, vehicle_id, topic=TRIP_INFO):
+        self.api, self.vehicle_id, self.topic = api, vehicle_id, topic
         self.route, self._changed, self._stop = None, asyncio.Event(), None
 
     async def __aenter__(self):
-        self._stop = await self.api.subscribe_for_parallax_messages(self.vehicle_id, self._on_message, [TRIP_INFO])
+        self._stop = await self.api.subscribe_for_parallax_messages(self.vehicle_id, self._on_message, [self.topic])
         if self._stop is None:
-            raise RuntimeError("couldn't subscribe to the vehicle's trip status (see the debug log)")
+            raise RuntimeError(f"couldn't subscribe to the vehicle's {self.topic} (see the debug log)")
         await self.wait(lambda route: True, 10)  # the subscription starts with the current route
         return self
 
@@ -254,7 +255,7 @@ class TripWatcher:
 
     def _on_message(self, message):
         data = ((message.get("payload") or {}).get("data") or {}).get("parallaxMessages") or {}
-        if data.get("rvm") == TRIP_INFO:
+        if data.get("rvm") == self.topic:
             self.route = base64.b64decode(data.get("payload") or "")
             self._changed.set()
 

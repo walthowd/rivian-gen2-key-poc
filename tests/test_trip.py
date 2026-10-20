@@ -151,6 +151,17 @@ class InsertPosition(unittest.TestCase):
                 rivian_key.insert_position(bad, 2)
 
 
+class Security(unittest.TestCase):
+    def test_gear_guard_states_and_honk_names(self):
+        from protocol import f_var
+        on = rivian_key.SECURITY_OPS["gearguard"]["on"][2]
+        off = rivian_key.SECURITY_OPS["gearguard"]["off"][2]
+        self.assertTrue(on(f_var(1, 2) + f_var(2, 1)) and off(f_var(1, 1) + f_var(2, 1)))
+        self.assertFalse(on(f_var(1, 1)) or off(f_var(1, 2)))
+        self.assertEqual(rivian_key.resolve_command("honk"), "ACTIVATE_EXTERNAL_SOUND")
+        self.assertEqual(rivian_key.resolve_command("flash"), "FLASH_EXTERNAL_LIGHTS")
+
+
 class Places(unittest.TestCase):
     SAVED = [{"name": "123 Main St", "userGivenName": "Home", "address": "123 Main St",
               "coordinate": {"latitude": 1.5, "longitude": 2.5}}]

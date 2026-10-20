@@ -155,6 +155,18 @@ meta      { isVehicleModelOp: true, model: operation name, requiresWakeup: true,
 The cloud answers `success: true` for unsigned or wrongly signed payloads too, but the vehicle
 only acts on correctly signed ones. Results show up on the `parallaxMessages` subscription.
 
+Security operations (no params), each confirmed by the vehicle publishing a state topic on
+`parallaxMessages`:
+
+| Operation | Effect | State topic |
+|---|---|---|
+| `security.video_monitoring.enable_video_monitoring` / `disable_video_monitoring` | Gear Guard motion cameras on / off | `security.video_monitoring.state`, field 1: 2 on, 1 off |
+| `security.alarm.enable_panic` / `disable_panic` | car alarm (panic) on / off | `security.alarm.state` |
+
+Gen 2 honks and flashes with the cloud commands `ACTIVATE_EXTERNAL_SOUND` and
+`FLASH_EXTERNAL_LIGHTS` (signed like any `sendVehicleCommand`); the combined
+`HONK_AND_FLASH_LIGHTS` is refused with `CONFLICT/VEHICLE_COMMAND_ERROR`.
+
 Halloween operations (prefix `holiday_celebration.car_costume.`), params as protobuf fields:
 
 | Operation | Params | Effect |
