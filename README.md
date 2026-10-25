@@ -69,7 +69,7 @@ You can decline and run the same command later to resume.
 
 After pairing, setup checks status for up to a minute and reports success only when the key
 is both paired and enabled. It then offers an optional menu of test commands (wake, lock,
-unlock, windows open/close, honk); nothing is sent until you select it. If setup fails, it
+unlock), the ones that work on every vehicle; nothing is sent until you select it. If setup fails, it
 points to redacted debug logs and the repository's issue page. A saved session that has
 expired can be replaced with `python rivian_key.py login` before rerunning setup.
 

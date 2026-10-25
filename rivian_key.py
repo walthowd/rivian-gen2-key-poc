@@ -834,7 +834,9 @@ async def wait_for_status(args, done, message, attempts=6):
 
 
 async def test_commands(key_name):
-    commands = ("wake", "lock", "unlock", "windows_open", "windows_close", "honk")
+    # Only commands known to work on every vehicle (legacy R1s and parallax-only R2s); windows and
+    # honk are ignored by an R2, and flash by a 2026 R1S. The rest are available via `command`.
+    commands = ("wake", "lock", "unlock")
     print("\nOptional vehicle tests: selecting a command sends it to the vehicle.")
     while True:
         for index, command in enumerate(commands, 1):
