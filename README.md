@@ -69,7 +69,7 @@ You can decline and run the same command later to resume.
 
 After pairing, setup checks status for up to a minute and reports success only when the key
 is both paired and enabled. It then offers an optional menu of test commands (wake, lock,
-unlock, windows open/close, honk); nothing is sent until you select it. If setup fails, it
+unlock); nothing is sent until you select it. If setup fails, it
 points to redacted debug logs and the repository's issue page. A saved session that has
 expired can be replaced with `python rivian_key.py login` before rerunning setup.
 
@@ -126,9 +126,10 @@ python rivian_key.py command precondition_temp 21
 python rivian_key.py command cabin_hvac_left_seat_heat 3
 ```
 
-Seen working on a Gen 2 R1S: `lock`, `unlock`, `windows_open`, `windows_close`, `honk`, `flash`
-(and `wake` is accepted). The rest come from rivian-python-client and haven't been tried with
-this POC yet; please report. If the vehicle is asleep, send `wake` first.
+Seen working on a Gen 2 R1S: `lock`, `unlock`, `windows_open`, `windows_close`, `honk`
+(and `wake` is accepted); `flash` does nothing on a 2026 R1S. The rest come from
+rivian-python-client and haven't been tried with this POC yet; please report. If the vehicle
+is asleep, send `wake` first.
 
 ### Navigation
 

@@ -23,6 +23,8 @@ DEFAULT_MODEL = b"rivian-gen2-key-poc"
 
 # ── protobuf encoding ────────────────────────────────────────────────
 def _varint(n):
+    if n < 0:
+        raise ValueError("varint cannot encode a negative value")
     out = b""
     while True:
         byte = n & 0x7F

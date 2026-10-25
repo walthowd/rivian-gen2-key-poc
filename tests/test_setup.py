@@ -124,7 +124,7 @@ class GuidedSetup(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_test_command_does_not_end_setup(self):
         self.cmd_command.side_effect = [RuntimeError("boom"), True]
-        self.inputs.side_effect = ["6", "1", "0"]
+        self.inputs.side_effect = ["3", "1", "0"]
         self.assertEqual(await rivian_key.cmd_setup(self.args), 0)
         self.assertEqual(self.cmd_command.await_count, 2)
 

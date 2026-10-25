@@ -42,6 +42,7 @@ from rivian.exceptions import RivianPhoneLimitReachedError
 from rivian.utils import generate_key_pair
 
 import halloween
+import parallax
 import trip
 import video
 from protocol import parse_fields
@@ -59,6 +60,16 @@ ALIASES = {
     "windows_close": "CLOSE_ALL_WINDOWS",
     "frunk_open": "OPEN_FRUNK",
     "frunk_close": "CLOSE_FRUNK",
+    "trunk_open": "OPEN_LIFTGATE_UNLATCH_TAILGATE",
+    "trunk_close": "CLOSE_LIFTGATE",
+    "liftgate_open": "OPEN_LIFTGATE_UNLATCH_TAILGATE",
+    "liftgate_close": "CLOSE_LIFTGATE",
+    "charge_port_open": "OPEN_CHARGE_PORT_DOOR",
+    "charge_port_close": "CLOSE_CHARGE_PORT_DOOR",
+    "panic_on": "PANIC_ON",
+    "panic_off": "PANIC_OFF",
+    "charge_start": "START_CHARGING",
+    "charge_stop": "STOP_CHARGING",
     "precondition_on": "VEHICLE_CABIN_PRECONDITION_ENABLE",
     "precondition_off": "VEHICLE_CABIN_PRECONDITION_DISABLE",
     "precondition_temp": "CABIN_PRECONDITIONING_SET_TEMP",
@@ -66,17 +77,22 @@ ALIASES = {
 }
 # Commands seen working on a Gen 2 vehicle with this POC (others are untested here).
 TESTED = {"WAKE_VEHICLE", "LOCK_ALL_CLOSURES_FEEDBACK", "UNLOCK_ALL_CLOSURES", "OPEN_ALL_WINDOWS",
-          "CLOSE_ALL_WINDOWS", "ACTIVATE_EXTERNAL_SOUND", "FLASH_EXTERNAL_LIGHTS"}
-# Gen 2 honks and flashes with these (the Rivian app's names; newer rivian-python-client has them
-# too); the combined HONK_AND_FLASH_LIGHTS gets CONFLICT/VEHICLE_COMMAND_ERROR on Gen 2.
+          "CLOSE_ALL_WINDOWS", "ACTIVATE_EXTERNAL_SOUND"}
+# The Rivian app's honk / flash names (newer rivian-python-client has them too). Gen 2 honks with
+# ACTIVATE_EXTERNAL_SOUND. FLASH_EXTERNAL_LIGHTS is accepted by the cloud, but a 2026 R1S never
+# executes it (it stays at state 3); the app hides flash on vehicles that don't report the
+# HONK_AND_FLASH_COMMAND feature, so it may still work on variants that do. The combined HONK_AND_FLASH_LIGHTS gets CONFLICT/VEHICLE_COMMAND_ERROR.
 EXTRA_COMMANDS = ["ACTIVATE_EXTERNAL_SOUND", "FLASH_EXTERNAL_LIGHTS"]
 # Commands that need a value, and the parameter it goes in.
 VALUE_PARAMS = {"CABIN_PRECONDITIONING_SET_TEMP": ("HVAC_set_temp", float, "°C 16-29"),
                 "CHARGING_LIMITS": ("SOC_limit", int, "percent 50-100")}
-for _name in ("DEFROST_DEFOG", "LEFT_SEAT_HEAT", "LEFT_SEAT_VENT", "REAR_LEFT_SEAT_HEAT", "REAR_RIGHT_SEAT_HEAT",
-              "RIGHT_SEAT_HEAT", "RIGHT_SEAT_VENT", "STEERING_HEAT", "THIRD_ROW_LEFT_SEAT_HEAT",
-              "THIRD_ROW_RIGHT_SEAT_HEAT"):
-    VALUE_PARAMS["CABIN_HVAC_" + _name] = ("level", int, "0 off, 1 on, 2 low, 3 medium, 4 high")
+# Seat heat/vent take levels 0 off, 2 low, 3 medium, 4 high; the steering wheel takes 0/1/2/3;
+# defrost is 0 off / 1 on (these are the values the app's SurfaceHvacStatus maps, legacy and parallax).
+for _name in ("LEFT_SEAT_HEAT", "LEFT_SEAT_VENT", "REAR_LEFT_SEAT_HEAT", "REAR_RIGHT_SEAT_HEAT",
+              "RIGHT_SEAT_HEAT", "RIGHT_SEAT_VENT", "THIRD_ROW_LEFT_SEAT_HEAT", "THIRD_ROW_RIGHT_SEAT_HEAT"):
+    VALUE_PARAMS["CABIN_HVAC_" + _name] = ("level", int, "0 off, 2 low, 3 medium, 4 high")
+VALUE_PARAMS["CABIN_HVAC_STEERING_HEAT"] = ("level", int, "0 off, 1 low, 2 medium, 3 high")
+VALUE_PARAMS["CABIN_HVAC_DEFROST_DEFOG"] = ("level", int, "0 off, 1 on")
 
 
 def all_commands():
@@ -340,35 +356,125 @@ async def cmd_status(args):
         await api.close()
 
 
-async def cmd_command(args):
-    if args.list or not args.command:
-        aliases = {v: k for k, v in ALIASES.items()}
-        print("Commands (tested on a Gen 2 vehicle marked *):")
-        for command in all_commands():
-            value = VALUE_PARAMS.get(command)
-            print(f"  {'*' if command in TESTED else ' '} {command.lower():42} "
-                  f"{('(' + aliases[command] + ')') if command in aliases else ''}"
-                  f"{('  VALUE: ' + value[2]) if value else ''}")
-        print("\nHalloween: python rivian_key.py halloween --help")
-        return
-    command = resolve_command(args.command)
-    params = None
-    if command in VALUE_PARAMS:
-        field, kind, text = VALUE_PARAMS[command]
-        if args.value is None:
-            die(f"{command.lower()} needs a value: {text}")
-        params = {field: kind(args.value)}
+# getVehicleCommand state codes, as observed on a Gen 2 R1S: 3 = delivered, waiting on the vehicle;
+# 0 = the vehicle executed it (honk goes 3 -> 0 with responseCode 928). A command the vehicle doesn't
+# support (flash on a 2026 R1S) stays at 3.
+LEGACY_PENDING_STATE, LEGACY_DONE_STATE = 3, 0
+LEGACY_TIMEOUT, LEGACY_POLL_INTERVAL = 20, 2
+
+
+async def legacy_outcome(api, command_id):
+    """Poll a legacy command until the vehicle answers: (answered, state, responseCode)."""
+    deadline = time.monotonic() + LEGACY_TIMEOUT
+    state = code = None
+    while time.monotonic() < deadline:
+        await asyncio.sleep(LEGACY_POLL_INTERVAL)
+        response = await api.get_vehicle_command_state(command_id)
+        data = ((await response.json()).get("data") or {}).get("getVehicleCommand") or {}
+        state, code = data.get("state"), data.get("responseCode")
+        if state is not None and state != LEGACY_PENDING_STATE:
+            return True, state, code
+    return False, state, code
+
+
+async def show_routing(args):
+    """Print how each command would be sent for this vehicle (parallax vs legacy)."""
     key = load_key(args.key)
     api = await connect()
     try:
+        user = await current_user(api)
+        features = parallax.supported_features(user, key["vehicle_id"])
+        model = parallax.model(user, key["vehicle_id"])
+        print(f"{key.get('vehicle_name') or key['vehicle_id']}  model={model or 'unknown'}")
+        if not features:
+            print("  vehicle reports no SupportedFeatures — every command goes legacy")
+        else:
+            print("  category flags (AVAILABLE => that category uses parallax):")
+            for category, flag in parallax.CATEGORY_FLAG.items():
+                print(f"    {flag:14} {features.get(flag, '(absent)'):16} -> {category}")
+        aliases = {v: k for k, v in ALIASES.items()}
+        print("  per command:")
+        for command in all_commands():
+            if command in parallax.COMMANDS:
+                route = "PARALLAX" if parallax.category_available(command, features) else "legacy"
+            else:
+                route = "legacy-only (no parallax equivalent)"
+            print(f"    {aliases.get(command, command.lower()):24} {route}")
+    finally:
+        await api.close()
+
+
+async def cmd_command(args):
+    if getattr(args, "features", False):
+        await show_routing(args)
+        return
+    if args.list or not args.command:
+        aliases = {v: k for k, v in ALIASES.items()}
+        print("Commands (tested on a Gen 2 vehicle marked *; P = has a parallax equivalent for new R1s/R2s):")
+        for command in all_commands():
+            value = VALUE_PARAMS.get(command)
+            marks = ("*" if command in TESTED else " ") + ("P" if command in parallax.COMMANDS else " ")
+            print(f"  {marks} {command.lower():42} "
+                  f"{('(' + aliases[command] + ')') if command in aliases else ''}"
+                  f"{('  VALUE: ' + value[2]) if value else ''}")
+        print("\nRouting for your vehicle: python rivian_key.py command --features")
+        print("Halloween: python rivian_key.py halloween --help")
+        return
+    command = resolve_command(args.command)
+    if command in VALUE_PARAMS and args.value is None:
+        die(f"{command.lower()} needs a value: {VALUE_PARAMS[command][2]}")
+    has_parallax = command in parallax.COMMANDS
+    force_parallax, force_legacy = getattr(args, "parallax", False), getattr(args, "legacy", False)
+    if force_parallax and not has_parallax:
+        die(f"{command.lower()} has no parallax equivalent (honk, flash and wake are legacy-only)")
+    key = load_key(args.key)
+    api = await connect()
+    try:
+        user = await current_user(api)
+        features = parallax.supported_features(user, key["vehicle_id"])
+        model = parallax.model(user, key["vehicle_id"])
+        parallax_capable = has_parallax and parallax.category_available(command, features)
+        use_parallax = force_parallax or (not force_legacy and parallax_capable)
+        if use_parallax:
+            secret = derive_secret(key["private_key"], key["vehicle_public_key"])
+            log.secret(secret.hex(), "hmac_key")
+            op, payload = parallax.build(command, args.value, model)
+            log.debug(f"parallax {op} params={payload.hex()} model={model}")
+            ok = await halloween.send(api, key, secret, op, payload)
+            log(f"{command} (parallax {op}): "
+                f"{'accepted' if ok else 'rejected (is the key paired?)'}")
+            return ok
+        if parallax_capable:
+            log("note: sending legacy though the vehicle reports this category as parallax-capable (--parallax to switch)")
+        elif not has_parallax and features.get("PVS_BD_CMD") == "AVAILABLE":
+            log("note: no parallax equivalent for this command; it may be ignored by a parallax-only vehicle")
+        params = None
+        if command in VALUE_PARAMS:
+            field, kind, _text = VALUE_PARAMS[command]
+            params = {field: kind(args.value)}
         command_id = await api.send_vehicle_command(
             command=command, vehicle_id=key["vehicle_id"], phone_id=key["phone_id"],
             identity_id=key["identity_id"], vehicle_key=key["vehicle_public_key"],
             private_key=key["private_key"], params=params)
         log.secret(command_id, "command_id")
         log.debug(f"command {command} params={params}: id={command_id}")
-        log(f"{command}: {'accepted' if command_id else 'rejected (is the key paired?)'}")
-        return bool(command_id)
+        if not command_id:
+            log(f"{command} (legacy): rejected (is the key paired?)")
+            return False
+        if getattr(args, "no_wait", False):
+            log(f"{command} (legacy): accepted (not waiting for the vehicle)")
+            return True
+        answered, state, code = await legacy_outcome(api, command_id)
+        log.debug(f"command {command}: vehicle state={state} responseCode={code}")
+        if not answered:
+            log(f"{command} (legacy): accepted, but not acknowledged by the vehicle within "
+                f"{LEGACY_TIMEOUT}s (it may not support this command)")
+            return False
+        if state == LEGACY_DONE_STATE:
+            log(f"{command} (legacy): completed by the vehicle")
+            return True
+        log(f"{command} (legacy): not completed by the vehicle (state={state}, responseCode={code})")
+        return False
     finally:
         await api.close()
 
@@ -728,7 +834,9 @@ async def wait_for_status(args, done, message, attempts=6):
 
 
 async def test_commands(key_name):
-    commands = ("wake", "lock", "unlock", "windows_open", "windows_close", "honk")
+    # Only commands known to work on every vehicle (legacy R1s and parallax-only R2s); windows and
+    # honk are ignored by an R2, and flash by a 2026 R1S. The rest are available via `command`.
+    commands = ("wake", "lock", "unlock")
     print("\nOptional vehicle tests: selecting a command sends it to the vehicle.")
     while True:
         for index, command in enumerate(commands, 1):
@@ -844,6 +952,13 @@ def main(argv=None):
     s.add_argument("command", nargs="?", help="e.g. honk, lock, seat_heat... (--list shows all)")
     s.add_argument("value", nargs="?", help="for commands that need one (temperature, level, limit)")
     s.add_argument("--list", action="store_true", help="list every command")
+    s.add_argument("--features", action="store_true",
+                   help="show the vehicle's command routing (parallax vs legacy per command)")
+    s.add_argument("--parallax", action="store_true",
+                   help="force the parallax path (new R1s/R2s); errors if the command has no equivalent")
+    s.add_argument("--legacy", action="store_true", help="force the legacy sendVehicleCommand path")
+    s.add_argument("--no-wait", action="store_true",
+                   help="legacy only: don't wait for the vehicle to confirm the command")
     s.add_argument("--key", help="key name (only if you have several)")
     s = sub.add_parser("navigate", help="send one destination to the vehicle")
     s.add_argument("place", help='LAT,LNG[=Name] (e.g. "40.76,-91.14=Golf"), a saved location (Home, Work, …) '
