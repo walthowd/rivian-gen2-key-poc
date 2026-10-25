@@ -167,6 +167,75 @@ Gen 2 honks and flashes with the cloud commands `ACTIVATE_EXTERNAL_SOUND` and
 `FLASH_EXTERNAL_LIGHTS` (signed like any `sendVehicleCommand`); the combined
 `HONK_AND_FLASH_LIGHTS` is refused with `CONFLICT/VEHICLE_COMMAND_ERROR`.
 
+### Legacy vs parallax routing (new R1s / R2s)
+
+Older R1s accept legacy `sendVehicleCommand`. New R1s (2027+) and R2s accept only the signed
+`SendParallaxPayload` above and refuse `sendVehicleCommand` (issues #4, #5). The Rivian app
+decides **per command category** from the vehicle's `SupportedFeatures` (decompiled app,
+`emm.e0`): for a command's category, if the matching `PVS_*_CMD` flag is `AVAILABLE` it sends
+parallax, otherwise legacy. Model string / model year are **not** used to route.
+
+```
+query SupportedFeatures { currentUser { vehicles { id vehicle
+  { vehicleState { supportedFeatures { name status } } } } } }
+```
+
+(`get_user_information` already returns this, so no extra query is needed.)
+
+| Category | SupportedFeatures flag | Parallax operations |
+|---|---|---|
+| body | `PVS_BD_CMD` | `body.locks.lock` / `unlock`, `body.closures.open` / `close` |
+| security | `PVS_SEC_CMD` | `security.alarm.enable_panic` / `disable_panic`, `security.video_monitoring.*` |
+| comfort | `PVS_COMF_CMD` | `comfort.cabin.*` (preconditioning, temp, …) |
+| energy | `PVS_ENRG_CMD` | `charging.energy.start_charging` / `stop_charging` / `set_charge_limit` |
+| ota | `PVS_OTA_CMD` | `ota.install.install_now` |
+
+Only `status == "AVAILABLE"` counts; `UPDATE_FIRMWARE` means not parallax-capable yet. (The app
+additionally gates on a server-side rollout flag, `parallaxCommand`, that a client cannot read, so
+auto-routing here means "the vehicle reports the category as AVAILABLE", which is the vehicle-side
+half of the app's decision.)
+
+Legacy command → parallax payload (field numbers from the app, confirmed against
+rivian-python-client `body.proto`):
+
+| Legacy command | Operation | `params` bytes |
+|---|---|---|
+| `LOCK_ALL_CLOSURES_FEEDBACK` | `body.locks.lock` | *(empty)* |
+| `UNLOCK_ALL_CLOSURES` | `body.locks.unlock` | `08 01` (field 1 = all) |
+| `OPEN_FRUNK` / `CLOSE_FRUNK` | `body.closures.open` / `close` | `0a 01 05` (ClosureId FRUNK=5) |
+| `OPEN_LIFTGATE_UNLATCH_TAILGATE` | `body.closures.open` | `0a 01 07` (LIFTGATE; R1T uses `06` TAILGATE) |
+| `OPEN_CHARGE_PORT_DOOR` / `CLOSE_…` | `body.closures.open` / `close` | `0a 01 0a` (CHARGE_PORT=10) |
+| `OPEN_ALL_WINDOWS` / `CLOSE_ALL_WINDOWS` | `body.closures.open` / `close` | `0a 02 90 4e` (GROUP_WINDOWS=10000) |
+| `PANIC_ON` / `PANIC_OFF` | `security.alarm.enable_panic` / `disable_panic` | *(empty)* |
+| `VEHICLE_CABIN_PRECONDITION_ENABLE` / `DISABLE` | `comfort.cabin.enable_preconditioning` / `disable_` | *(empty)* |
+| `CABIN_PRECONDITIONING_SET_TEMP` | `comfort.cabin.set_preconditioning_temperature` | `0d <float32 LE °C>` (21.0 = `0d 00 00 a8 41`) |
+| `START_CHARGING` / `STOP_CHARGING` | `charging.energy.start_charging` / `stop_charging` | *(empty)* |
+| `CHARGING_LIMITS` | `charging.energy.set_charge_limit` | `08 <percent>` (80 = `08 50`) |
+| `CABIN_HVAC_*_SEAT_HEAT` / `_VENT` | `comfort.cabin.set_cabin_surface` | see below |
+| `CABIN_HVAC_STEERING_HEAT` | `comfort.cabin.set_cabin_surface` | see below |
+| `CABIN_HVAC_DEFROST_DEFOG` | `comfort.cabin.set_defrost_defog` | `08 04` off, `08 03` on (DEFOG_DEFROST) |
+
+`set_cabin_surface` is `{1: instance, 2: level, 3: status, 4: device}`, all enums (proto3 omits a
+field left at 0, so level 0 drops field 2). instance (CabinSurface): STEERING_WHEEL=1, ROW_1_LEFT=5,
+ROW_1_RIGHT=7, ROW_2_LEFT=8, ROW_2_RIGHT=10, ROW_3_LEFT=11, ROW_3_RIGHT=13. device
+(ConditioningType): HEAT=1, VENT=2. status: OFF=1, ON=2. level (a32): LEVEL1=1, LEVEL2=2, LEVEL3=3.
+The app maps the legacy "level" int through `SurfaceHvacStatus`: **seats** take `0,2,3,4` (off, L1, L2,
+L3) and the **steering wheel** takes `0,1,2,3`. Example left-seat heat low =
+`08 05 10 01 18 02 20 01`; steering off = `08 01 18 01 20 01`.
+
+`closure` is a packed repeated `ClosureId` at field 1, so a single closure is `0a 01 <id>` and all
+windows `0a 02 90 4e`.
+
+`HonkHorn`, `FlashLights` and `WakeVehicle` have **no** parallax operation: `wsg.b()` returns `""`
+for them and `emm.e0` classifies them as category UNKNOWN, so the app always sends them as legacy
+`sendVehicleCommand`. They work on older R1s; on a parallax-only vehicle that refuses legacy they
+have no path. Wake *appears* to work on R2s only because every parallax send carries
+`meta.requiresWakeup: true`, so the cloud wakes the vehicle to deliver any parallax command — that
+is a side effect of other commands, not a standalone wake op.
+
+In the POC: `command <name>` auto-routes from `SupportedFeatures`; `--parallax` / `--legacy` force a
+path and `command --features` prints the per-command routing for a vehicle.
+
 ### Gear Guard live camera streaming (Kinesis WebRTC)
 
 `security.video_monitoring.start_live_streaming` (signed, params field 4 = `{1: camera, 2: device
