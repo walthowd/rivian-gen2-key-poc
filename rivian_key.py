@@ -77,9 +77,11 @@ ALIASES = {
 }
 # Commands seen working on a Gen 2 vehicle with this POC (others are untested here).
 TESTED = {"WAKE_VEHICLE", "LOCK_ALL_CLOSURES_FEEDBACK", "UNLOCK_ALL_CLOSURES", "OPEN_ALL_WINDOWS",
-          "CLOSE_ALL_WINDOWS", "ACTIVATE_EXTERNAL_SOUND", "FLASH_EXTERNAL_LIGHTS"}
-# Gen 2 honks and flashes with these (the Rivian app's names; newer rivian-python-client has them
-# too); the combined HONK_AND_FLASH_LIGHTS gets CONFLICT/VEHICLE_COMMAND_ERROR on Gen 2.
+          "CLOSE_ALL_WINDOWS", "ACTIVATE_EXTERNAL_SOUND"}
+# The Rivian app's honk / flash names (newer rivian-python-client has them too). Gen 2 honks with
+# ACTIVATE_EXTERNAL_SOUND. FLASH_EXTERNAL_LIGHTS is accepted by the cloud, but current Gen 2 firmware
+# never executes it (it stays at state 3), and the app hides flash on vehicles that don't report the
+# HONK_AND_FLASH_COMMAND feature. The combined HONK_AND_FLASH_LIGHTS gets CONFLICT/VEHICLE_COMMAND_ERROR.
 EXTRA_COMMANDS = ["ACTIVATE_EXTERNAL_SOUND", "FLASH_EXTERNAL_LIGHTS"]
 # Commands that need a value, and the parameter it goes in.
 VALUE_PARAMS = {"CABIN_PRECONDITIONING_SET_TEMP": ("HVAC_set_temp", float, "°C 16-29"),

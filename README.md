@@ -126,8 +126,9 @@ python rivian_key.py command precondition_temp 21
 python rivian_key.py command cabin_hvac_left_seat_heat 3
 ```
 
-Seen working on a Gen 2 R1S: `lock`, `unlock`, `windows_open`, `windows_close`, `honk`, `flash`
-(and `wake` is accepted). The rest come from rivian-python-client and haven't been tried with
+Seen working on a Gen 2 R1S: `lock`, `unlock`, `windows_open`, `windows_close`, `honk`
+(and `wake` is accepted). `flash` is accepted but current Gen 2 firmware doesn't act on it, and the
+Rivian app doesn't offer it either. The rest come from rivian-python-client and haven't been tried with
 this POC yet; please report. If the vehicle is asleep, send `wake` first.
 
 ### Navigation
