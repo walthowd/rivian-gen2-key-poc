@@ -354,6 +354,27 @@ async def cmd_status(args):
         await api.close()
 
 
+# getVehicleCommand state codes, as observed on a Gen 2 R1S: 3 = delivered, waiting on the vehicle;
+# 0 = the vehicle executed it (honk goes 3 -> 0 with responseCode 928). A command the vehicle doesn't
+# support (flash on current firmware) stays at 3.
+LEGACY_PENDING_STATE, LEGACY_DONE_STATE = 3, 0
+LEGACY_TIMEOUT, LEGACY_POLL_INTERVAL = 20, 2
+
+
+async def legacy_outcome(api, command_id):
+    """Poll a legacy command until the vehicle answers: (answered, state, responseCode)."""
+    deadline = time.monotonic() + LEGACY_TIMEOUT
+    state = code = None
+    while time.monotonic() < deadline:
+        await asyncio.sleep(LEGACY_POLL_INTERVAL)
+        response = await api.get_vehicle_command_state(command_id)
+        data = ((await response.json()).get("data") or {}).get("getVehicleCommand") or {}
+        state, code = data.get("state"), data.get("responseCode")
+        if state is not None and state != LEGACY_PENDING_STATE:
+            return True, state, code
+    return False, state, code
+
+
 async def show_routing(args):
     """Print how each command would be sent for this vehicle (parallax vs legacy)."""
     key = load_key(args.key)
@@ -435,8 +456,23 @@ async def cmd_command(args):
             private_key=key["private_key"], params=params)
         log.secret(command_id, "command_id")
         log.debug(f"command {command} params={params}: id={command_id}")
-        log(f"{command} (legacy): {'accepted' if command_id else 'rejected (is the key paired?)'}")
-        return bool(command_id)
+        if not command_id:
+            log(f"{command} (legacy): rejected (is the key paired?)")
+            return False
+        if getattr(args, "no_wait", False):
+            log(f"{command} (legacy): accepted (not waiting for the vehicle)")
+            return True
+        answered, state, code = await legacy_outcome(api, command_id)
+        log.debug(f"command {command}: vehicle state={state} responseCode={code}")
+        if not answered:
+            log(f"{command} (legacy): accepted, but not acknowledged by the vehicle within "
+                f"{LEGACY_TIMEOUT}s (it may not support this command)")
+            return False
+        if state == LEGACY_DONE_STATE:
+            log(f"{command} (legacy): completed by the vehicle")
+            return True
+        log(f"{command} (legacy): not completed by the vehicle (state={state}, responseCode={code})")
+        return False
     finally:
         await api.close()
 
@@ -917,6 +953,8 @@ def main(argv=None):
     s.add_argument("--parallax", action="store_true",
                    help="force the parallax path (new R1s/R2s); errors if the command has no equivalent")
     s.add_argument("--legacy", action="store_true", help="force the legacy sendVehicleCommand path")
+    s.add_argument("--no-wait", action="store_true",
+                   help="legacy only: don't wait for the vehicle to confirm the command")
     s.add_argument("--key", help="key name (only if you have several)")
     s = sub.add_parser("navigate", help="send one destination to the vehicle")
     s.add_argument("place", help='LAT,LNG[=Name] (e.g. "40.76,-91.14=Golf"), a saved location (Home, Work, …) '
