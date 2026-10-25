@@ -79,9 +79,9 @@ ALIASES = {
 TESTED = {"WAKE_VEHICLE", "LOCK_ALL_CLOSURES_FEEDBACK", "UNLOCK_ALL_CLOSURES", "OPEN_ALL_WINDOWS",
           "CLOSE_ALL_WINDOWS", "ACTIVATE_EXTERNAL_SOUND"}
 # The Rivian app's honk / flash names (newer rivian-python-client has them too). Gen 2 honks with
-# ACTIVATE_EXTERNAL_SOUND. FLASH_EXTERNAL_LIGHTS is accepted by the cloud, but current Gen 2 firmware
-# never executes it (it stays at state 3), and the app hides flash on vehicles that don't report the
-# HONK_AND_FLASH_COMMAND feature. The combined HONK_AND_FLASH_LIGHTS gets CONFLICT/VEHICLE_COMMAND_ERROR.
+# ACTIVATE_EXTERNAL_SOUND. FLASH_EXTERNAL_LIGHTS is accepted by the cloud, but a 2026 R1S never
+# executes it (it stays at state 3); the app hides flash on vehicles that don't report the
+# HONK_AND_FLASH_COMMAND feature, so it may still work on variants that do. The combined HONK_AND_FLASH_LIGHTS gets CONFLICT/VEHICLE_COMMAND_ERROR.
 EXTRA_COMMANDS = ["ACTIVATE_EXTERNAL_SOUND", "FLASH_EXTERNAL_LIGHTS"]
 # Commands that need a value, and the parameter it goes in.
 VALUE_PARAMS = {"CABIN_PRECONDITIONING_SET_TEMP": ("HVAC_set_temp", float, "°C 16-29"),
@@ -358,7 +358,7 @@ async def cmd_status(args):
 
 # getVehicleCommand state codes, as observed on a Gen 2 R1S: 3 = delivered, waiting on the vehicle;
 # 0 = the vehicle executed it (honk goes 3 -> 0 with responseCode 928). A command the vehicle doesn't
-# support (flash on current firmware) stays at 3.
+# support (flash on a 2026 R1S) stays at 3.
 LEGACY_PENDING_STATE, LEGACY_DONE_STATE = 3, 0
 LEGACY_TIMEOUT, LEGACY_POLL_INTERVAL = 20, 2
 

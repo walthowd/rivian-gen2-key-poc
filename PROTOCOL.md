@@ -165,10 +165,10 @@ Security operations (no params), each confirmed by the vehicle publishing a stat
 
 Gen 2 honks with the cloud command `ACTIVATE_EXTERNAL_SOUND` (signed like any
 `sendVehicleCommand`). `FLASH_EXTERNAL_LIGHTS` is byte-identical to what the app sends (no params),
-but current Gen 2 firmware never executes it: `getVehicleCommand` stays at state 3 (delivered, awaiting
+but a 2026 R1S never executes it: `getVehicleCommand` stays at state 3 (delivered, awaiting
 the vehicle) instead of going to 0 (executed; honk gives responseCode 928). The app only shows honk /
-flash when the vehicle reports the `HONK_AND_FLASH_COMMAND` feature, which a 2026 R1S does not. The
-combined `HONK_AND_FLASH_LIGHTS` is refused with `CONFLICT/VEHICLE_COMMAND_ERROR`.
+flash when the vehicle reports the `HONK_AND_FLASH_COMMAND` feature, which a 2026 R1S does not; flash may still
+work on variants that do report it. The combined `HONK_AND_FLASH_LIGHTS` is refused with `CONFLICT/VEHICLE_COMMAND_ERROR`.
 
 ### Legacy vs parallax routing (new R1s / R2s)
 
