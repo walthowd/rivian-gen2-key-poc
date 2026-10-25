@@ -401,7 +401,8 @@ async def cmd_command(args):
     if command in VALUE_PARAMS and args.value is None:
         die(f"{command.lower()} needs a value: {VALUE_PARAMS[command][2]}")
     has_parallax = command in parallax.COMMANDS
-    if args.parallax and not has_parallax:
+    force_parallax, force_legacy = getattr(args, "parallax", False), getattr(args, "legacy", False)
+    if force_parallax and not has_parallax:
         die(f"{command.lower()} has no parallax equivalent (honk, flash and wake are legacy-only)")
     key = load_key(args.key)
     api = await connect()
@@ -410,7 +411,7 @@ async def cmd_command(args):
         features = parallax.supported_features(user, key["vehicle_id"])
         model = parallax.model(user, key["vehicle_id"])
         parallax_capable = has_parallax and parallax.category_available(command, features)
-        use_parallax = args.parallax or (not args.legacy and parallax_capable)
+        use_parallax = force_parallax or (not force_legacy and parallax_capable)
         if use_parallax:
             secret = derive_secret(key["private_key"], key["vehicle_public_key"])
             log.secret(secret.hex(), "hmac_key")
