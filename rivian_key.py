@@ -14,7 +14,9 @@
   pet on|off            pet comfort (keeps the cabin comfortable for a pet)
   climatehold on|off    start / end a climate hold; `climatehold duration MIN` sets its length
   stream                watch the Gear Guard live cameras in your browser
-  navigate PLACE        send one destination to the vehicle's navigation
+  search QUERY          search for places like the app's map search (from the vehicle)
+  navigate PLACE        send one destination to the vehicle's navigation;
+                        --pick N searches for PLACE and sends search result N
   trip PLACE [PLACE…]   plan a trip (with charging stops) and send it to the vehicle;
                         --add adds stops to the active trip, --end stops it
   remove                unregister the key and delete it locally
@@ -510,12 +512,60 @@ async def places(api, user, vehicle, texts):
     return [resolve_place(text, saved) for text in texts]
 
 
+async def search_results(api, vehicle, query, near=None, autocomplete=False):
+    """Search from NEAR ("LAT,LNG") or the vehicle's last position."""
+    if near:
+        if not (match := PLACE_RE.fullmatch(near)) or match[3]:
+            die("--near takes LAT,LNG (no name)")
+        latitude, longitude = float(match[1]), float(match[2])
+    else:
+        latitude, longitude, _ = await trip.vehicle_position(api, vehicle["id"])
+        if latitude is None:
+            die("the vehicle's position is unknown; use --near LAT,LNG")
+    return await trip.search_places(api, query, latitude, longitude, autocomplete)
+
+
+def print_results(found):
+    for n, result in enumerate(found.get("results") or [], 1):
+        location, drive = result.get("location") or {}, result.get("driveDetails") or {}
+        distance, duration = drive.get("driveDistance"), drive.get("driveDuration")
+        miles = "?" if distance is None else f"{distance / 1609.344:.0f}"
+        minutes = "?" if duration is None else f"{duration / 60:.0f}"
+        print(f"{n:2}. {result['name']} — {location.get('formattedAddress') or '?'} ({miles} mi, {minutes} min)")
+
+
+async def cmd_search(args):
+    api = await connect()
+    try:
+        vehicle = pick_vehicle(await current_user(api), args.vehicle)
+        found = await search_results(api, vehicle, args.query, args.near, args.autocomplete)
+        if args.autocomplete:
+            print("\n".join(p["query"] for p in found.get("queryPredictions") or []) or "no suggestions")
+        elif found.get("results"):
+            print_results(found)
+            near = f" --near {args.near}" if args.near else ""
+            print(f'navigate there with: python rivian_key.py navigate "{args.query}"{near} --pick N')
+        else:
+            print("no places found")
+        return True
+    finally:
+        await api.close()
+
+
 async def cmd_navigate(args):
     api = await connect()
     try:
         user = await current_user(api)
         vehicle = pick_vehicle(user, args.vehicle)
-        if args.place.startswith(("https://", "http://", "geo:")):  # e.g. a Google Maps share link
+        if args.near and args.pick is None:
+            die("--near needs --pick")
+        if args.pick is not None:
+            results = (await search_results(api, vehicle, args.place, args.near)).get("results") or []
+            if not 1 <= args.pick <= len(results):
+                print_results({"results": results})
+                die(f"--pick takes 1-{len(results)}" if results else "no places found")
+            place = trip.search_stop(results[args.pick - 1])
+        elif args.place.startswith(("https://", "http://", "geo:")):  # e.g. a Google Maps share link
             place = {"name": args.place, "url": args.place}
         else:
             [place] = await places(api, user, vehicle, [args.place])
@@ -993,7 +1043,14 @@ def main(argv=None):
     s.add_argument("--key", help="key name (only if you have several)")
     s = sub.add_parser("navigate", help="send one destination to the vehicle")
     s.add_argument("place", help='LAT,LNG[=Name] (e.g. "40.76,-91.14=Golf"), a saved location (Home, Work, …) '
-                   "or a link (Google Maps share link, geo:LAT,LNG)")
+                   "or a link (Google Maps share link, geo:LAT,LNG); with --pick, what to search for")
+    s.add_argument("--pick", type=int, help="search for PLACE and navigate to result N (see `search`)")
+    s.add_argument("--near", help="with --pick: search from LAT,LNG instead of the vehicle")
+    s.add_argument("--vehicle", help="vehicle name (only if you have several)")
+    s = sub.add_parser("search", help="search for places like the app's map search")
+    s.add_argument("query", help='what to search for, e.g. "REI" or an address')
+    s.add_argument("--near", help="search from LAT,LNG instead of the vehicle's position")
+    s.add_argument("--autocomplete", action="store_true", help="show type-ahead suggestions instead")
     s.add_argument("--vehicle", help="vehicle name (only if you have several)")
     s = sub.add_parser("trip", help="plan a trip with charging stops and send it to the vehicle")
     s.add_argument("places", nargs="*", help="stops in order: LAT,LNG[=Name] or saved location names")
@@ -1032,7 +1089,7 @@ def main(argv=None):
     log_path = log.open(f"rivian_key-{args.cmd}")
     handler = {"setup": cmd_setup, "login": cmd_login, "enroll": cmd_enroll, "import-ha": cmd_import_ha,
                "status": cmd_status, "command": cmd_command, "halloween": cmd_halloween,
-               "remove": cmd_remove, "navigate": cmd_navigate, "trip": cmd_trip,
+               "remove": cmd_remove, "navigate": cmd_navigate, "search": cmd_search, "trip": cmd_trip,
                "gearguard": cmd_security, "alarm": cmd_security, "pet": cmd_security,
                "climatehold": cmd_security, "stream": cmd_stream}[args.cmd]
     try:

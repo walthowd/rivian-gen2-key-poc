@@ -212,5 +212,33 @@ class Places(unittest.TestCase):
         self.assertIn("'Home'", die.call_args.args[0])
 
 
+class Search(unittest.TestCase):
+    RESULT = {"id": "ChIJ_rei", "name": "REI", "location": {
+        "formattedAddress": "5901 Mills Civic Pkwy, West Des Moines, IA",
+        "coordinate": {"latitude": 41.56028, "longitude": -93.78724},
+        "navCoordinate": {"latitude": 41.56001, "longitude": -93.78730}}}
+
+    def test_result_is_sent_by_name_at_its_entrance(self):
+        stop = trip.search_stop(self.RESULT)
+        self.assertEqual((stop["latitude"], stop["longitude"]), (41.56001, -93.78730))
+        url = trip.share_url(stop)
+        self.assertTrue(url.startswith("https://telenav.id/entity?"))
+        self.assertIn("entity_id=ChIJ_rei", url)
+        self.assertIn("name=REI", url)
+
+    def test_search_variables(self):
+        sent = {}
+
+        async def gql(api, operation, query, variables):
+            sent.update(variables)
+            return {"places": {"results": []}}
+
+        with patch.object(trip, "gql", gql):
+            asyncio.run(trip.search_places(None, "RE", 40.1, -92.5, autocomplete=True))
+        self.assertEqual(sent["params"], {"query": "RE", "autocomplete": "Place",
+                                          "userLocation": {"latitude": 40.1, "longitude": -92.5}})
+
+
 if __name__ == "__main__":
     unittest.main()
+

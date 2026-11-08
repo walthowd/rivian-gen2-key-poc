@@ -139,6 +139,8 @@ signed-in session (not a paired key), and wake the vehicle if it is asleep.
 
 ```bash
 python rivian_key.py navigate "Arrowhead Stadium"                                          # one destination
+python rivian_key.py search REI                                                             # search like the app's map
+python rivian_key.py navigate REI --pick 3                                                 # navigate to search result 3
 python rivian_key.py trip --dry-run "Arrowhead Stadium" "44.9737,-93.2581=U.S. Bank Stadium"  # plan and show only
 python rivian_key.py trip "Arrowhead Stadium" "44.9737,-93.2581=U.S. Bank Stadium"            # send the trip
 python rivian_key.py trip --add "40.9640,-91.5510=Coffee stop"                               # add as the next stop
@@ -154,10 +156,14 @@ A place is one of:
 | `Home`, `Work` | your saved home / work |
 | `"44.9737,-93.2581=U.S. Bank Stadium"` | coordinates, with an optional name after `=` |
 | a Google Maps share link | `navigate` only |
+| `REI` with `--pick 3` | result 3 of `search REI` (`navigate` only) |
 
-There is no search by name yet. For coordinates, right-click the spot in Google Maps (or press
-and hold on a phone) and copy the `lat, lng` shown. Once you've navigated somewhere, it is a
-recent location and works by name.
+`search QUERY` searches like the app's map search (Google results, from the vehicle's position or
+`--near LAT,LNG`) and lists them with driving distance and time; `--autocomplete` shows type-ahead
+suggestions for partial text instead. `navigate QUERY --pick N` navigates to result N of that search (the vehicle
+shows the place's name). Results come in the search's own order, not nearest first. For
+coordinates, right-click the spot in Google Maps (or press and hold on a phone) and copy the
+`lat, lng` shown. Once you've navigated somewhere, it is a recent location and works by name.
 
 `trip` replaces any trip the vehicle is navigating. It sends the stops the way the app's trip
 planner does; the vehicle plans the route and charging stops itself (minimum arrival charge `--arrive`, default 20%). Before sending it shows

@@ -198,6 +198,29 @@ async def saved_locations(api, user_id, vehicle_id):
     return data.get("mapSearchSavedLocations") or []
 
 
+PLACES_QUERY = (
+    "query places($params: PlacesQueryParams!) { places(params: $params) { queryPredictions { query } "
+    "results { id name distance location { formattedAddress coordinate { latitude longitude } "
+    "navCoordinate { latitude longitude } } driveDetails { driveDistance driveDuration } } } }")
+
+
+async def search_places(api, query, latitude, longitude, autocomplete=False):
+    """The app's map search (Google results) from LAT,LNG: {"queryPredictions", "results"}.
+    With autocomplete ("Place") only the suggested search texts are useful; "None" is a full search."""
+    data = await gql(api, "places", PLACES_QUERY, {"params": {
+        "query": query, "userLocation": {"latitude": latitude, "longitude": longitude},
+        "autocomplete": "Place" if autocomplete else "None"}})
+    return data.get("places") or {}
+
+
+def search_stop(result):
+    """A stop from a search result, at the place's entrance; share_url sends it by name."""
+    location = result.get("location") or {}
+    point = location.get("navCoordinate") or location.get("coordinate") or {}
+    return {"name": result["name"], "address": location.get("formattedAddress"), "place_id": result["id"],
+            "latitude": point["latitude"], "longitude": point["longitude"]}
+
+
 async def share_location(api, vehicle_id, stop):
     data = await gql(api, "ParseAndShareLocationToVehicle",
                      "mutation ParseAndShareLocationToVehicle($locationUrl: String!, $vehicleId: String!, "
