@@ -11,6 +11,8 @@
   halloween ACTION      Ghostbusters costume: on/off, show, sound, music, volume, lights
   gearguard on|off      Gear Guard motion cameras (video monitoring)
   alarm on|off          car alarm (panic) — loud!
+  pet on|off            pet comfort (keeps the cabin comfortable for a pet)
+  climatehold on|off    start / end a climate hold; `climatehold duration MIN` sets its length
   stream                watch the Gear Guard live cameras in your browser
   navigate PLACE        send one destination to the vehicle's navigation
   trip PLACE [PLACE…]   plan a trip (with charging stops) and send it to the vehicle;
@@ -648,19 +650,30 @@ async def cmd_trip(args):
 
 
 # Signed parallax operations (like the app's), each confirmed by a state topic the vehicle publishes:
-# action -> (operation, topic, done(state bytes) or None for "any change").
+# action -> (operation, params, topic, done(state bytes) or None for "any change").
+# pet / climatehold params are the app's {1: action} (1 on, 2 off), captured from the app.
 SECURITY_OPS = {
-    "gearguard": {"on": ("security.video_monitoring.enable_video_monitoring", "security.video_monitoring.state",
+    "gearguard": {"on": ("security.video_monitoring.enable_video_monitoring", b"", "security.video_monitoring.state",
                          lambda state: parse_fields(state).get(1) == [2]),
-                  "off": ("security.video_monitoring.disable_video_monitoring", "security.video_monitoring.state",
+                  "off": ("security.video_monitoring.disable_video_monitoring", b"", "security.video_monitoring.state",
                           lambda state: parse_fields(state).get(1) == [1])},
-    "alarm": {"on": ("security.alarm.enable_panic", "security.alarm.state", None),
-              "off": ("security.alarm.disable_panic", "security.alarm.state", None)},
+    "alarm": {"on": ("security.alarm.enable_panic", b"", "security.alarm.state", None),
+              "off": ("security.alarm.disable_panic", b"", "security.alarm.state", None)},
+    "pet": {"on": ("comfort.cabin.set_pet_mode", b"\x08\x01", "comfort.cabin.pet_mode_status",
+                   lambda state: parse_fields(state).get(1) == [1]),
+            "off": ("comfort.cabin.set_pet_mode", b"\x08\x02", "comfort.cabin.pet_mode_status",
+                    lambda state: parse_fields(state).get(1) in (None, [0]))},
+    "climatehold": {"on": ("comfort.cabin.set_climate_hold", b"\x08\x01", "comfort.cabin.climate_hold_status",
+                           lambda state: parse_fields(state).get(1) == [3]),
+                    "off": ("comfort.cabin.set_climate_hold", b"\x08\x02", "comfort.cabin.climate_hold_status",
+                            lambda state: parse_fields(state).get(1) == [2])},
 }
 
 
 async def cmd_security(args):
-    op, topic, done = SECURITY_OPS[args.cmd][args.action]
+    if args.action == "duration":
+        return await climate_hold_duration(args)
+    op, params, topic, done = SECURITY_OPS[args.cmd][args.action]
     key = load_key(args.key)
     secret = derive_secret(key["private_key"], key["vehicle_public_key"])
     log.secret(secret.hex(), "hmac_key")
@@ -671,7 +684,7 @@ async def cmd_security(args):
             if done and before is not None and done(before):
                 print(f"{args.cmd} is already {args.action}")
                 return True
-            if not await halloween.send(api, key, secret, op, b""):
+            if not await halloween.send(api, key, secret, op, params):
                 die(f"Rivian refused {op}")
             print(f"sent {args.cmd} {args.action}; waiting for the vehicle (wakes it if asleep)…")
             ok = await watch.wait(done or (lambda state: state != before), 90)
@@ -680,6 +693,24 @@ async def cmd_security(args):
         return ok
     finally:
         await api.close()
+
+
+async def climate_hold_duration(args):
+    """Set how long a climate hold lasts, like the app's Hold control (no paired key needed)."""
+    try:
+        minutes = int(args.value or "")
+    except ValueError:
+        die("climatehold duration needs minutes: 120-480 in steps of 15")
+    key = load_key(args.key)
+    api = await connect()
+    try:
+        ok = await api.set_climate_hold_duration(key["vehicle_id"], minutes)
+    except Exception as error:  # noqa: BLE001 — the library rejects other durations
+        die(str(error))
+    finally:
+        await api.close()
+    print(f"climate hold duration {minutes} min: " + ("sent" if ok else "rejected"))
+    return ok
 
 
 async def cmd_stream(args):
@@ -973,9 +1004,13 @@ def main(argv=None):
     s.add_argument("--end", action="store_true", help="end the trip running on the vehicle")
     s.add_argument("--vehicle", help="vehicle name (only if you have several)")
     for name, text in (("gearguard", "Gear Guard motion cameras (video monitoring) on/off"),
-                       ("alarm", "car alarm (panic) on/off — loud!")):
+                       ("alarm", "car alarm (panic) on/off — loud!"),
+                       ("pet", "pet comfort on/off"),
+                       ("climatehold", "climate hold on/off, or `duration MINUTES` (120-480, steps of 15)")):
         s = sub.add_parser(name, help=text)
-        s.add_argument("action", choices=["on", "off"])
+        s.add_argument("action", choices=["on", "off", "duration"] if name == "climatehold" else ["on", "off"])
+        if name == "climatehold":
+            s.add_argument("value", nargs="?", help="duration: minutes, 120-480 in steps of 15")
         s.add_argument("--key", help="key name (only if you have several)")
     s = sub.add_parser("stream", help="start a Gear Guard camera and watch it in your browser")
     s.add_argument("camera", nargs="?", default="front", choices=list(video.CAMERAS),
@@ -998,7 +1033,8 @@ def main(argv=None):
     handler = {"setup": cmd_setup, "login": cmd_login, "enroll": cmd_enroll, "import-ha": cmd_import_ha,
                "status": cmd_status, "command": cmd_command, "halloween": cmd_halloween,
                "remove": cmd_remove, "navigate": cmd_navigate, "trip": cmd_trip,
-               "gearguard": cmd_security, "alarm": cmd_security, "stream": cmd_stream}[args.cmd]
+               "gearguard": cmd_security, "alarm": cmd_security, "pet": cmd_security,
+               "climatehold": cmd_security, "stream": cmd_stream}[args.cmd]
     try:
         result = asyncio.run(handler(args))
     except (KeyboardInterrupt, EOFError):

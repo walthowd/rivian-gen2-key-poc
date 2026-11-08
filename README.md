@@ -126,10 +126,11 @@ python rivian_key.py command precondition_temp 21
 python rivian_key.py command cabin_hvac_left_seat_heat 3
 ```
 
-Seen working on a Gen 2 R1S: `lock`, `unlock`, `windows_open`, `windows_close`, `honk`
-(and `wake` is accepted); `flash` does nothing on a 2026 R1S. The rest come from
-rivian-python-client and haven't been tried with this POC yet; please report. If the vehicle
-is asleep, send `wake` first.
+Seen working on a Gen 2 R1S over Parallax (November 2026): `lock`, `unlock`, windows, seat and
+steering wheel heat, preconditioning and its temperature, defrost, charge limit, charge port,
+Gear Guard video and panic. The same R1S now seems to refuse the legacy path: `honk` (which
+has no Parallax equivalent) and a `--legacy` charge limit both stayed at state 2, though `honk`
+worked on it in October. If the vehicle is asleep, any Parallax command wakes it.
 
 ### Navigation
 
@@ -175,6 +176,18 @@ python rivian_key.py alarm on         # / off: the car alarm (panic). Loud!
 ```
 
 Each waits until the vehicle reports the new state (it wakes the vehicle if needed).
+
+### Pet comfort and climate hold
+
+```bash
+python rivian_key.py pet on                      # / off: pet comfort
+python rivian_key.py climatehold on              # / off: start or end a climate hold
+python rivian_key.py climatehold duration 240    # hold length in minutes, 120-480 in steps of 15
+```
+
+`pet` and `climatehold on|off` are signed and wait for the vehicle's state, like Gear Guard.
+`duration` changes the setting only (what the app's Hold control does) and needs no paired key.
+All three were seen working on a 2026 R1S; the payloads match the app's.
 
 ### Live cameras (Gear Guard)
 

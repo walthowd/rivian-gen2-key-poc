@@ -154,12 +154,23 @@ class InsertPosition(unittest.TestCase):
 class Security(unittest.TestCase):
     def test_gear_guard_states_and_honk_names(self):
         from protocol import f_var
-        on = rivian_key.SECURITY_OPS["gearguard"]["on"][2]
-        off = rivian_key.SECURITY_OPS["gearguard"]["off"][2]
+        on = rivian_key.SECURITY_OPS["gearguard"]["on"][3]
+        off = rivian_key.SECURITY_OPS["gearguard"]["off"][3]
         self.assertTrue(on(f_var(1, 2) + f_var(2, 1)) and off(f_var(1, 1) + f_var(2, 1)))
         self.assertFalse(on(f_var(1, 1)) or off(f_var(1, 2)))
         self.assertEqual(rivian_key.resolve_command("honk"), "ACTIVATE_EXTERNAL_SOUND")
         self.assertEqual(rivian_key.resolve_command("flash"), "FLASH_EXTERNAL_LIGHTS")
+
+    def test_pet_and_climate_hold(self):
+        """Payloads and confirming states as seen from the app on a 2026 R1S."""
+        from protocol import f_var
+        ops = rivian_key.SECURITY_OPS
+        self.assertEqual([ops[name][action][1] for name in ("pet", "climatehold") for action in ("on", "off")],
+                         [b"\x08\x01", b"\x08\x02"] * 2)
+        self.assertTrue(ops["pet"]["on"][3](f_var(1, 1)) and ops["pet"]["off"][3](b""))
+        self.assertTrue(ops["climatehold"]["on"][3](f_var(1, 3) + f_var(2, 1)))
+        self.assertTrue(ops["climatehold"]["off"][3](f_var(1, 2) + f_var(2, 1)))
+        self.assertFalse(ops["pet"]["on"][3](b"") or ops["climatehold"]["on"][3](f_var(1, 2)))
 
 
 class Places(unittest.TestCase):
